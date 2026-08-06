@@ -74,7 +74,7 @@ func TestUnidirectionalPropagation(t *testing.T) {
 	srcRoot := t.TempDir()
 	destRoot := t.TempDir()
 
-	fw := watch.NewFileWatcher(30*time.Millisecond, watch.DefaultBufferSize)
+	fw := watch.NewFileWatcher(30*time.Millisecond, watch.DefaultBufferSize, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -167,7 +167,7 @@ func TestBidirectionalNoEchoLoop(t *testing.T) {
 	defer cancel()
 
 	startNode := func(machineID, root string) <-chan watch.ChangeEvent {
-		fw := watch.NewFileWatcher(30*time.Millisecond, watch.DefaultBufferSize)
+		fw := watch.NewFileWatcher(30*time.Millisecond, watch.DefaultBufferSize, nil)
 		changes, watchErrs := fw.Watch(ctx, root)
 		t.Cleanup(func() { fw.Close() })
 		go func() {

@@ -107,12 +107,24 @@ type pendingEvent struct {
 	oldRel  string
 }
 
+// PathMatcher decides whether a root-relative, slash-separated path should
+// be excluded from a Watcher session. internal/ignore.Matcher satisfies
+// this by structural typing — this package deliberately doesn't import
+// internal/ignore directly (same reasoning as pipeline's DeriveChainFunc
+// callback: Fase 5's watcher core has no business knowing Fase 5's
+// exclusion policy exists as a separate package, only that something can
+// answer "is this path excluded").
+type PathMatcher interface {
+	Match(relPath string) bool
+}
+
 // fsWatcher is the FileWatcher implementation: a native recursive backend
 // per platform (winwatcher_windows.go / dirwatcher_notify.go) feeding a
 // single loop goroutine that debounces and filters.
 type fsWatcher struct {
 	debounce   time.Duration
 	bufferSize uint
+	matcher    PathMatcher // nil means "defaultSkipDirs only" — see excluded()
 
 	w    *recursiveDirWatcher
 	root string
@@ -123,8 +135,12 @@ type fsWatcher struct {
 }
 
 // NewFileWatcher returns a FileWatcher. debounce <= 0 uses DefaultDebounce;
-// bufferSize == 0 uses DefaultBufferSize.
-func NewFileWatcher(debounce time.Duration, bufferSize uint) FileWatcher {
+// bufferSize == 0 uses DefaultBufferSize. matcher may be nil, in which case
+// only the hardcoded defaultSkipDirs fast-path applies (no .fileshareignore
+// support) — every production caller should pass a real
+// internal/ignore.Matcher; nil exists mainly so tests that don't care about
+// exclusion don't need to construct one.
+func NewFileWatcher(debounce time.Duration, bufferSize uint, matcher PathMatcher) FileWatcher {
 	if debounce <= 0 {
 		debounce = DefaultDebounce
 	}
@@ -132,9 +148,28 @@ func NewFileWatcher(debounce time.Duration, bufferSize uint) FileWatcher {
 		bufferSize = DefaultBufferSize
 	}
 	return &fsWatcher{
-		debounce: debounce, bufferSize: bufferSize,
+		debounce: debounce, bufferSize: bufferSize, matcher: matcher,
 		dirFiles: map[string]map[string]bool{}, fileDir: map[string]string{},
 	}
+}
+
+// excluded reports whether absPath (which must be under fw.root) should be
+// dropped: either it's under a defaultSkipDirs directory (the cheap
+// basename-only fast-path that also lets registerTree's WalkDir skip
+// descending into e.g. node_modules entirely, not just filter it out after
+// the fact), or fw.matcher says so via the full relative path.
+func (fw *fsWatcher) excluded(absPath string) bool {
+	if fw.underSkippedDir(absPath) || isSkippedDir(filepath.Base(absPath)) {
+		return true
+	}
+	if fw.matcher == nil {
+		return false
+	}
+	rel, err := filepath.Rel(fw.root, absPath)
+	if err != nil {
+		return false
+	}
+	return fw.matcher.Match(filepath.ToSlash(rel))
 }
 
 func (fw *fsWatcher) Watch(ctx context.Context, root string) (<-chan ChangeEvent, <-chan error) {
@@ -190,9 +225,12 @@ func (fw *fsWatcher) registerTree(dir string) {
 			return nil // best-effort: one bad entry shouldn't abort registration
 		}
 		if d.IsDir() {
-			if p != dir && isSkippedDir(d.Name()) {
+			if p != dir && fw.excluded(p) {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if fw.excluded(p) {
 			return nil
 		}
 
@@ -356,7 +394,7 @@ func (fw *fsWatcher) handleEvent(ctx context.Context, ev rawEvent, schedule func
 }
 
 func (fw *fsWatcher) handleCreate(ctx context.Context, absPath string, schedule func(string, pendingEvent), changes chan<- ChangeEvent) {
-	if fw.underSkippedDir(absPath) {
+	if fw.excluded(absPath) {
 		return
 	}
 	info, err := os.Stat(absPath)
@@ -365,9 +403,6 @@ func (fw *fsWatcher) handleCreate(ctx context.Context, absPath string, schedule 
 	}
 
 	if info.IsDir() {
-		if isSkippedDir(filepath.Base(absPath)) {
-			return
-		}
 		fw.registerTree(absPath)
 		fw.mu.Lock()
 		rels := make([]string, 0, len(fw.dirFiles[absPath]))
@@ -392,7 +427,7 @@ func (fw *fsWatcher) handleCreate(ctx context.Context, absPath string, schedule 
 }
 
 func (fw *fsWatcher) handleWrite(absPath string, schedule func(string, pendingEvent)) {
-	if fw.underSkippedDir(absPath) {
+	if fw.excluded(absPath) {
 		return
 	}
 	info, err := os.Stat(absPath)
@@ -463,8 +498,8 @@ func (fw *fsWatcher) handleRemove(absPath string, schedule func(string, pendingE
 // regardless of how much is underneath it — the receiver mirrors it with a
 // single os.Rename (Fase 5), not a re-transfer of every descendant.
 func (fw *fsWatcher) handleRename(ctx context.Context, oldAbsPath, newAbsPath string, schedule func(string, pendingEvent), changes chan<- ChangeEvent) {
-	oldSkipped := fw.underSkippedDir(oldAbsPath) || isSkippedDir(filepath.Base(oldAbsPath))
-	newSkipped := fw.underSkippedDir(newAbsPath) || isSkippedDir(filepath.Base(newAbsPath))
+	oldSkipped := fw.excluded(oldAbsPath)
+	newSkipped := fw.excluded(newAbsPath)
 
 	switch {
 	case oldSkipped && newSkipped:

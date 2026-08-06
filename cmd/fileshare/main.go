@@ -25,6 +25,7 @@ import (
 	"filesharer/internal/daemon"
 	"filesharer/internal/handshake"
 	"filesharer/internal/identity"
+	"filesharer/internal/ignore"
 	"filesharer/internal/pipeline"
 	"filesharer/internal/syncfs"
 	fsnats "filesharer/internal/transport/nats"
@@ -365,7 +366,11 @@ func cmdWatch(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	fw := watch.NewFileWatcher(watch.DefaultDebounce, watch.DefaultBufferSize)
+	matcher, err := ignore.Load(localPath)
+	if err != nil {
+		return fmt.Errorf("load %s: %w", ignore.FileName, err)
+	}
+	fw := watch.NewFileWatcher(watch.DefaultDebounce, watch.DefaultBufferSize, matcher)
 	changes, watchErrs := fw.Watch(ctx, localPath)
 	defer fw.Close()
 	go func() {

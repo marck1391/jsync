@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -35,7 +36,7 @@ func collectEvents(t *testing.T, changes <-chan ChangeEvent, errs <-chan error, 
 func TestFileWatcher_DetectsCreateWriteRemove(t *testing.T) {
 	dir := t.TempDir()
 
-	fw := NewFileWatcher(30*time.Millisecond, DefaultBufferSize)
+	fw := NewFileWatcher(30*time.Millisecond, DefaultBufferSize, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -62,7 +63,7 @@ func TestFileWatcher_DetectsCreateWriteRemove(t *testing.T) {
 func TestFileWatcher_DebounceCoalescesSaveStorm(t *testing.T) {
 	dir := t.TempDir()
 
-	fw := NewFileWatcher(100*time.Millisecond, DefaultBufferSize)
+	fw := NewFileWatcher(100*time.Millisecond, DefaultBufferSize, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -96,7 +97,7 @@ func TestFileWatcher_DetectsRemove(t *testing.T) {
 		t.Fatalf("setup write: %v", err)
 	}
 
-	fw := NewFileWatcher(30*time.Millisecond, DefaultBufferSize)
+	fw := NewFileWatcher(30*time.Millisecond, DefaultBufferSize, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -138,7 +139,7 @@ func TestFileWatcher_RenamePreservesCorrelation(t *testing.T) {
 		t.Fatalf("setup write: %v", err)
 	}
 
-	fw := NewFileWatcher(30*time.Millisecond, DefaultBufferSize)
+	fw := NewFileWatcher(30*time.Millisecond, DefaultBufferSize, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -193,7 +194,7 @@ func TestFileWatcher_SkipsDefaultIgnoredDirs(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	fw := NewFileWatcher(30*time.Millisecond, DefaultBufferSize)
+	fw := NewFileWatcher(30*time.Millisecond, DefaultBufferSize, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -211,6 +212,41 @@ func TestFileWatcher_SkipsDefaultIgnoredDirs(t *testing.T) {
 	for _, ev := range events {
 		if ev.RelPath != "" && ev.RelPath != "real.txt" {
 			t.Errorf("unexpected event for ignored path: %+v", ev)
+		}
+	}
+}
+
+// stubMatcher is a minimal PathMatcher for testing the wiring itself,
+// independent of internal/ignore's real gitignore parsing (that package
+// has its own tests) — proves NewFileWatcher's matcher parameter actually
+// gets consulted, not just that nil is backward compatible.
+type stubMatcher struct{ ignoredSuffix string }
+
+func (m stubMatcher) Match(relPath string) bool {
+	return strings.HasSuffix(relPath, m.ignoredSuffix)
+}
+
+func TestFileWatcher_HonorsCustomPathMatcher(t *testing.T) {
+	dir := t.TempDir()
+
+	fw := NewFileWatcher(30*time.Millisecond, DefaultBufferSize, stubMatcher{ignoredSuffix: ".secret"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	changes, errs := fw.Watch(ctx, dir)
+	defer fw.Close()
+
+	if err := os.WriteFile(filepath.Join(dir, "creds.secret"), []byte("noise"), 0o644); err != nil {
+		t.Fatalf("write creds.secret: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "real.txt"), []byte("signal"), 0o644); err != nil {
+		t.Fatalf("write real.txt: %v", err)
+	}
+
+	events := collectEvents(t, changes, errs, testTimeout)
+	for _, ev := range events {
+		if ev.RelPath != "" && ev.RelPath != "real.txt" {
+			t.Errorf("unexpected event for path excluded by the custom matcher: %+v", ev)
 		}
 	}
 }

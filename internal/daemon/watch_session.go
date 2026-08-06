@@ -9,6 +9,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"filesharer/internal/handshake"
+	"filesharer/internal/ignore"
 	"filesharer/internal/syncfs"
 	fsnats "filesharer/internal/transport/nats"
 	"filesharer/internal/watch"
@@ -35,7 +36,11 @@ func WatchSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStream
 		return fmt.Errorf("daemon: ensure events consumer: %w", err)
 	}
 
-	fw := watch.NewFileWatcher(watch.DefaultDebounce, watch.DefaultBufferSize)
+	matcher, err := ignore.Load(sess.DestPath)
+	if err != nil {
+		return fmt.Errorf("daemon: load %s: %w", ignore.FileName, err)
+	}
+	fw := watch.NewFileWatcher(watch.DefaultDebounce, watch.DefaultBufferSize, matcher)
 	defer fw.Close()
 	changes, watchErrs := fw.Watch(ctx, sess.DestPath)
 	go func() {
