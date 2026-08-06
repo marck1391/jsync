@@ -13,6 +13,7 @@ import (
 // reconstructed (via X25519().NewPublicKey()) by hand.
 type bundleWire struct {
 	IdentityKey           []byte `json:"identity_key"`
+	IdentityDHKey         []byte `json:"identity_dh_key"`
 	SignedPreKeyID        uint32 `json:"signed_prekey_id"`
 	SignedPreKey          []byte `json:"signed_prekey"`
 	SignedPreKeySignature []byte `json:"signed_prekey_signature"`
@@ -28,6 +29,9 @@ func (b Bundle) MarshalJSON() ([]byte, error) {
 		SignedPreKeyID:        b.SignedPreKeyID,
 		SignedPreKeySignature: b.SignedPreKeySignature,
 		OneTimePreKeyID:       b.OneTimePreKeyID,
+	}
+	if b.IdentityDHKey != nil {
+		w.IdentityDHKey = b.IdentityDHKey.Bytes()
 	}
 	if b.SignedPreKey != nil {
 		w.SignedPreKey = b.SignedPreKey.Bytes()
@@ -49,9 +53,17 @@ func (b *Bundle) UnmarshalJSON(data []byte) error {
 	b.SignedPreKeyID = w.SignedPreKeyID
 	b.SignedPreKeySignature = w.SignedPreKeySignature
 	b.OneTimePreKeyID = w.OneTimePreKeyID
+	b.IdentityDHKey = nil
 	b.SignedPreKey = nil
 	b.OneTimePreKey = nil
 
+	if len(w.IdentityDHKey) > 0 {
+		pub, err := ecdh.X25519().NewPublicKey(w.IdentityDHKey)
+		if err != nil {
+			return fmt.Errorf("x3dh: decode identity DH key: %w", err)
+		}
+		b.IdentityDHKey = pub
+	}
 	if len(w.SignedPreKey) > 0 {
 		pub, err := ecdh.X25519().NewPublicKey(w.SignedPreKey)
 		if err != nil {

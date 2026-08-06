@@ -30,7 +30,12 @@ type OneTimePreKey struct {
 // OneTimePreKeyID == 0 means no One-Time PreKey was included (the pool was
 // empty when the bundle was built).
 type Bundle struct {
-	IdentityKey           ed25519.PublicKey
+	IdentityKey ed25519.PublicKey
+	// IdentityDHKey is the X25519 counterpart to IdentityKey — Ed25519
+	// signs, but X3DH's DH1/DH2 need an X25519 point, and there's no
+	// stdlib-safe Ed25519-to-X25519 conversion to lean on, so this is a
+	// second, separately generated static key rather than a derived one.
+	IdentityDHKey         *ecdh.PublicKey
 	SignedPreKeyID        uint32
 	SignedPreKey          *ecdh.PublicKey
 	SignedPreKeySignature []byte
