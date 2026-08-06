@@ -41,6 +41,18 @@ type Responder struct {
 	// callback, and blocking it here would stall every other incoming
 	// handshake.
 	OnApproved func(*Session)
+
+	// ResumeLookup, if set, is called synchronously from within Handle —
+	// unlike OnApproved, its result feeds directly into the Response being
+	// built, so Handle does wait for it — to fill Response.ResumedFiles for
+	// a DirectionUnidirectional (share) request. Same decoupling pattern as
+	// OnApproved: this package doesn't know about internal/daemon's
+	// ResumeRegistry or internal/pipeline's sandboxes, just a peer identity
+	// and a destination path in, a list of already-good files out. Must
+	// stay fast (bounded by what a partial prior attempt already wrote, not
+	// by the whole transfer) since it runs inline before the Response goes
+	// out over a request-reply with its own timeout.
+	ResumeLookup func(peerPub ed25519.PublicKey, destPath string) []ResumedFile
 }
 
 // Handle validates req and returns the Response to send back over NATS. It
@@ -71,11 +83,17 @@ func (r *Responder) Handle(req *Request) *Response {
 		r.OnApproved(sess)
 	}
 
+	var resumed []ResumedFile
+	if r.ResumeLookup != nil && req.RequestedDirection == DirectionUnidirectional {
+		resumed = r.ResumeLookup(ed25519.PublicKey(req.PublicKey), req.RequestedDestPath)
+	}
+
 	return &Response{
-		Approved:  true,
-		SessionID: sess.ID,
-		Params:    sess.Params,
-		Bundle:    r.Prekeys.Bundle(),
+		Approved:     true,
+		SessionID:    sess.ID,
+		Params:       sess.Params,
+		Bundle:       r.Prekeys.Bundle(),
+		ResumedFiles: resumed,
 	}
 }
 

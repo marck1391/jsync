@@ -58,7 +58,7 @@ func TestSendReceiveCommitRoundTrip(t *testing.T) {
 
 	sendErrCh := make(chan error, 1)
 	go func() {
-		ar := pipeline.NewArchiveReader(srcRoot)
+		ar := pipeline.NewArchiveReader(srcRoot, nil)
 		defer ar.Close()
 		sendErrCh <- pipeline.PublishArchive(ctx, js, subject, ar, smallChunkSize, nil)
 	}()
@@ -69,7 +69,7 @@ func TestSendReceiveCommitRoundTrip(t *testing.T) {
 	destDir := filepath.Join(dir, "final", "dest")
 	sandboxDir := pipeline.SandboxPath(destDir, sessionID)
 
-	if err := pipeline.ExtractArchive(pr, sandboxDir); err != nil {
+	if err := pipeline.ExtractArchive(pr, sandboxDir, nil); err != nil {
 		_ = pipeline.AbortSandbox(sandboxDir)
 		t.Fatalf("ExtractArchive: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestSendReceiveCommitRoundTripEncrypted(t *testing.T) {
 
 	sendErrCh := make(chan error, 1)
 	go func() {
-		ar := pipeline.NewArchiveReader(srcRoot)
+		ar := pipeline.NewArchiveReader(srcRoot, nil)
 		defer ar.Close()
 		sendErrCh <- pipeline.PublishArchive(ctx, js, subject, ar, smallChunkSize, enc)
 	}()
@@ -189,7 +189,7 @@ func TestSendReceiveCommitRoundTripEncrypted(t *testing.T) {
 	destDir := filepath.Join(dir, "final", "dest")
 	sandboxDir := pipeline.SandboxPath(destDir, sessionID)
 
-	if err := pipeline.ExtractArchive(pr, sandboxDir); err != nil {
+	if err := pipeline.ExtractArchive(pr, sandboxDir, nil); err != nil {
 		_ = pipeline.AbortSandbox(sandboxDir)
 		t.Fatalf("ExtractArchive: %v", err)
 	}

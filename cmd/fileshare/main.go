@@ -329,7 +329,16 @@ func cmdShare(args []string) error {
 		fmt.Println("encryption: on (X3DH + Double Ratchet)")
 	}
 
-	ar := pipeline.NewArchiveReader(srcPath)
+	var skip map[string]string
+	if len(resp.ResumedFiles) > 0 {
+		skip = make(map[string]string, len(resp.ResumedFiles))
+		for _, rf := range resp.ResumedFiles {
+			skip[rf.RelPath] = rf.ContentHash
+		}
+		fmt.Printf("resuming: %s already has %d file(s) from a previous attempt, skipping any that haven't changed\n", targetMachineID, len(skip))
+	}
+
+	ar := pipeline.NewArchiveReader(srcPath, skip)
 	defer ar.Close()
 
 	pubCtx, cancel := context.WithTimeout(context.Background(), *transferTimeout)

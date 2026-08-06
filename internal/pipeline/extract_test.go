@@ -1,8 +1,13 @@
 package pipeline
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -13,10 +18,11 @@ func TestExtractArchiveRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	sandbox := filepath.Join(dir, "sandbox")
 
-	ar := NewArchiveReader(srcRoot)
+	ar := NewArchiveReader(srcRoot, nil)
 	defer ar.Close()
 
-	if err := ExtractArchive(ar, sandbox); err != nil {
+	completed := map[string]string{}
+	if err := ExtractArchive(ar, sandbox, func(relPath, hash string) { completed[relPath] = hash }); err != nil {
 		t.Fatalf("ExtractArchive: %v", err)
 	}
 
@@ -32,6 +38,53 @@ func TestExtractArchiveRoundTrip(t *testing.T) {
 		if string(got) != string(want) {
 			t.Errorf("%s content mismatch: got %q, want %q", rel, got, want)
 		}
+
+		wantHash := sha256.Sum256(want)
+		if completed[rel] != hex.EncodeToString(wantHash[:]) {
+			t.Errorf("onFileComplete hash for %s = %q, want %x", rel, completed[rel], wantHash)
+		}
+	}
+	if len(completed) != 3 {
+		t.Errorf("onFileComplete called %d times, want 3: %v", len(completed), completed)
+	}
+}
+
+// TestExtractArchiveOnFileCompleteSkipsTruncatedFile is the resume
+// mechanism's core correctness property on the extraction side: a file
+// whose bytes never fully arrived must never be reported via
+// onFileComplete, even though earlier, fully-received entries in the same
+// stream should be. "a.txt" is small and written first by the walk, so it
+// lands well before the truncation point; "z_big.txt" is large enough that
+// cutting the stream in half reliably lands inside its data.
+func TestExtractArchiveOnFileCompleteSkipsTruncatedFile(t *testing.T) {
+	srcRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcRoot, "a.txt"), []byte("small and first"), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	big := strings.Repeat("x", 256*1024)
+	if err := os.WriteFile(filepath.Join(srcRoot, "z_big.txt"), []byte(big), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	full, err := io.ReadAll(NewArchiveReader(srcRoot, nil))
+	if err != nil {
+		t.Fatalf("read full archive: %v", err)
+	}
+	truncated := full[:len(full)/2]
+
+	dir := t.TempDir()
+	sandbox := filepath.Join(dir, "sandbox")
+	completed := map[string]string{}
+	err = ExtractArchive(bytes.NewReader(truncated), sandbox, func(relPath, hash string) { completed[relPath] = hash })
+	if err == nil {
+		t.Fatal("ExtractArchive: expected an error for a truncated stream")
+	}
+
+	if _, ok := completed["a.txt"]; !ok {
+		t.Error("onFileComplete should have been called for a.txt (fully received before the cut)")
+	}
+	if _, ok := completed["z_big.txt"]; ok {
+		t.Error("onFileComplete should NOT have been called for z_big.txt (cut off mid-copy)")
 	}
 }
 

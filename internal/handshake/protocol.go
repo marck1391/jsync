@@ -113,6 +113,22 @@ type Response struct {
 	SessionID string      `json:"session_id,omitempty"`
 	Params    Params      `json:"params"`
 	Bundle    x3dh.Bundle `json:"bundle"`
+
+	// ResumedFiles lists files the responder already has a verified-good
+	// copy of for this exact (requester, RequestedDestPath) pair, left over
+	// from a previous attempt that didn't finish (network recovery for
+	// `share` — see Responder.ResumeLookup). The initiator can skip
+	// re-archiving any of these whose local content still hashes to the
+	// same digest. Empty for a `watch` session, or a `share` with nothing
+	// to resume.
+	ResumedFiles []ResumedFile `json:"resumed_files,omitempty"`
+}
+
+// ResumedFile is one file the responder already has fully and correctly
+// from an interrupted prior attempt — see Response.ResumedFiles.
+type ResumedFile struct {
+	RelPath     string `json:"rel_path"`
+	ContentHash string `json:"content_hash"` // hex sha256
 }
 
 // VerifyBundle checks that Bundle's Signed PreKey was actually signed by

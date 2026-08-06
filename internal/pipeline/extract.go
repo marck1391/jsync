@@ -3,6 +3,8 @@ package pipeline
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -20,10 +22,18 @@ func SandboxPath(destDir, sessionID string) string {
 }
 
 // ExtractArchive reads a tar.gz stream from r and writes it into sandboxDir
-// (created fresh). It does not commit to destDir itself — call
-// CommitSandbox once this returns successfully, or AbortSandbox if it
-// returns an error.
-func ExtractArchive(r io.Reader, sandboxDir string) error {
+// (created fresh, or reused — see onFileComplete). It does not commit to
+// destDir itself — call CommitSandbox once this returns successfully, or
+// AbortSandbox if it returns an error.
+//
+// onFileComplete, if non-nil, is called with a regular file's relative tar
+// path and its sha256 hex digest right after that file's bytes have been
+// fully copied into sandboxDir — never for a file whose copy is cut short
+// by a read/write error (a network drop mid-file never calls it for that
+// file). This is the signal internal/daemon's resume support (Fase 2's
+// "recuperación de red") needs to know which files in a partially-received
+// sandbox are safe to keep rather than re-request.
+func ExtractArchive(r io.Reader, sandboxDir string, onFileComplete func(relPath, contentHash string)) error {
 	if err := os.MkdirAll(sandboxDir, 0o700); err != nil {
 		return fmt.Errorf("pipeline: create sandbox %s: %w", sandboxDir, err)
 	}
@@ -58,8 +68,12 @@ func ExtractArchive(r io.Reader, sandboxDir string) error {
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				return fmt.Errorf("pipeline: mkdir %s: %w", filepath.Dir(target), err)
 			}
-			if err := writeRegularFile(target, tr, os.FileMode(hdr.Mode)); err != nil {
+			hash, err := writeRegularFile(target, tr, os.FileMode(hdr.Mode))
+			if err != nil {
 				return err
+			}
+			if onFileComplete != nil {
+				onFileComplete(hdr.Name, hash)
 			}
 		default:
 			// Anything else (symlinks, devices, ...) is skipped — matches
@@ -68,19 +82,23 @@ func ExtractArchive(r io.Reader, sandboxDir string) error {
 	}
 }
 
-func writeRegularFile(target string, r io.Reader, mode os.FileMode) error {
+// writeRegularFile copies r into target and returns its sha256 hex digest,
+// computed in the same pass (via io.MultiWriter) rather than a separate
+// read afterward.
+func writeRegularFile(target string, r io.Reader, mode os.FileMode) (string, error) {
 	if mode == 0 {
 		mode = 0o600
 	}
 	f, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 	if err != nil {
-		return fmt.Errorf("pipeline: create %s: %w", target, err)
+		return "", fmt.Errorf("pipeline: create %s: %w", target, err)
 	}
 	defer f.Close()
-	if _, err := io.Copy(f, r); err != nil {
-		return fmt.Errorf("pipeline: write %s: %w", target, err)
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(f, h), r); err != nil {
+		return "", fmt.Errorf("pipeline: write %s: %w", target, err)
 	}
-	return nil
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // safeJoin joins base and a tar entry name, rejecting one that would

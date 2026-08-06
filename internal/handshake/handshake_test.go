@@ -1,6 +1,7 @@
 package handshake
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
 	"testing"
 	"time"
@@ -112,6 +113,82 @@ func TestHandshakeHonorsRequestedDirection(t *testing.T) {
 	}
 	if sess.Params.Direction != DirectionBidirectional {
 		t.Errorf("Session Params.Direction = %v, want DirectionBidirectional", sess.Params.Direction)
+	}
+}
+
+func TestHandshakeResumeLookupOnlyForUnidirectional(t *testing.T) {
+	initiator, err := identity.Generate("initiator-machine")
+	if err != nil {
+		t.Fatalf("Generate initiator: %v", err)
+	}
+	responder, _ := newTestResponder(t, initiator)
+
+	var calls int
+	var gotPeerPub []byte
+	var gotDestPath string
+	responder.ResumeLookup = func(peerPub ed25519.PublicKey, destPath string) []ResumedFile {
+		calls++
+		gotPeerPub = peerPub
+		gotDestPath = destPath
+		return []ResumedFile{{RelPath: "a.txt", ContentHash: "deadbeef"}}
+	}
+
+	req, err := BuildRequest(initiator, "/home/user/workspace/incoming", DirectionUnidirectional, false)
+	if err != nil {
+		t.Fatalf("BuildRequest: %v", err)
+	}
+	resp := responder.Handle(req)
+	if !resp.Approved {
+		t.Fatalf("Handle: expected approval, got rejection: %s", resp.Reason)
+	}
+	if calls != 1 {
+		t.Fatalf("ResumeLookup called %d times for a unidirectional request, want 1", calls)
+	}
+	if !ed25519.PublicKey(gotPeerPub).Equal(initiator.PublicKey) {
+		t.Error("ResumeLookup was not called with the initiator's public key")
+	}
+	if gotDestPath != "/home/user/workspace/incoming" {
+		t.Errorf("ResumeLookup destPath = %q, want %q", gotDestPath, "/home/user/workspace/incoming")
+	}
+	if len(resp.ResumedFiles) != 1 || resp.ResumedFiles[0].RelPath != "a.txt" || resp.ResumedFiles[0].ContentHash != "deadbeef" {
+		t.Errorf("Response.ResumedFiles = %+v, want [{a.txt deadbeef}]", resp.ResumedFiles)
+	}
+
+	// A bidirectional (watch) request has nothing to do with Fase 2 resume
+	// — ResumeLookup must not even be called for it.
+	watchReq, err := BuildRequest(initiator, "/home/user/workspace/watched", DirectionBidirectional, false)
+	if err != nil {
+		t.Fatalf("BuildRequest (watch): %v", err)
+	}
+	watchResp := responder.Handle(watchReq)
+	if !watchResp.Approved {
+		t.Fatalf("Handle (watch): expected approval, got rejection: %s", watchResp.Reason)
+	}
+	if calls != 1 {
+		t.Errorf("ResumeLookup should not be called for a bidirectional request, but call count is now %d", calls)
+	}
+	if len(watchResp.ResumedFiles) != 0 {
+		t.Errorf("watch Response.ResumedFiles = %+v, want empty", watchResp.ResumedFiles)
+	}
+}
+
+func TestHandshakeWithoutResumeLookupLeavesResumedFilesEmpty(t *testing.T) {
+	initiator, err := identity.Generate("initiator-machine")
+	if err != nil {
+		t.Fatalf("Generate initiator: %v", err)
+	}
+	responder, _ := newTestResponder(t, initiator) // ResumeLookup left nil
+
+	req, err := BuildRequest(initiator, "/home/user/workspace/incoming", DirectionUnidirectional, false)
+	if err != nil {
+		t.Fatalf("BuildRequest: %v", err)
+	}
+	resp := responder.Handle(req)
+	if !resp.Approved {
+		t.Fatalf("Handle: expected approval, got rejection: %s", resp.Reason)
+	}
+	if len(resp.ResumedFiles) != 0 {
+		t.Errorf("Response.ResumedFiles = %+v, want empty when ResumeLookup is nil", resp.ResumedFiles)
 	}
 }
 

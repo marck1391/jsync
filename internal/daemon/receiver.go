@@ -32,15 +32,21 @@ type Status struct {
 // session (Fase 4 §Paso 1-4): creates the session's JetStream stream and
 // consumer, receives (transparently decrypting, if the sender encrypted —
 // Fase 3) and extracts the incoming archive into a sandbox, commits it
-// atomically to sess.DestPath on success — or tears the sandbox down on any
-// failure — and publishes exactly one Status message when done.
+// atomically to sess.DestPath on success, and publishes exactly one Status
+// message when done. On any failure, the sandbox is parked in resumes
+// (Fase 2 "recuperación de red") instead of deleted — a later attempt from
+// the same peer to the same destPath (handshake.Responder.ResumeLookup)
+// can reclaim it and pick up where this one left off, skipping whatever
+// files were already fully received. resumes' own watchdog sweep
+// (cmd/fileshared) is what eventually deletes an abandoned sandbox no one
+// ever comes back to reclaim.
 //
 // prekeys is this node's own X3DH material, used only if the sender turns
 // out to have encrypted the transfer (chunk 0 carries an Encrypted header
 // or it doesn't — see pipeline.ReceiveArchive); localIdentityPub is this
 // node's Ed25519 identity key, needed to reconstruct the same Associated
 // Data the sender authenticated each chunk against.
-func ReceiveSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStream, sess *handshake.Session, prekeys *x3dh.Store, localIdentityPub ed25519.PublicKey) error {
+func ReceiveSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStream, sess *handshake.Session, prekeys *x3dh.Store, localIdentityPub ed25519.PublicKey, resumes *ResumeRegistry) error {
 	if _, err := fsnats.EnsureStream(ctx, js, sess.ID); err != nil {
 		return publishStatus(conn, sess.ID, fmt.Errorf("ensure stream: %w", err))
 	}
@@ -54,7 +60,13 @@ func ReceiveSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStre
 		return prekeys.DeriveResponderChain(initiatorDHPub, ephemeralPub, usedOTPID)
 	})
 
-	sandboxDir := pipeline.SandboxPath(sess.DestPath, sess.ID)
+	sandboxDir, completed, resumed := resumes.Claim(sess.PeerPublicKey, sess.DestPath)
+	if !resumed {
+		sandboxDir = pipeline.SandboxPath(sess.DestPath, sess.ID)
+		completed = map[string]string{}
+	}
+	onFileComplete := func(relPath, hash string) { completed[relPath] = hash }
+
 	pr, recvDone := pipeline.ReceiveArchive(ctx, consumer, associatedData, deriveChain)
 	// If ExtractArchive below returns early on error without draining pr
 	// to EOF, the goroutine behind ReceiveArchive can be left blocked
@@ -64,11 +76,11 @@ func ReceiveSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStre
 	// value and that goroutine always exits.
 	defer pr.Close()
 
-	extractErr := pipeline.ExtractArchive(pr, sandboxDir)
+	extractErr := pipeline.ExtractArchive(pr, sandboxDir, onFileComplete)
 	recvErr := <-recvDone
 
 	if extractErr != nil || recvErr != nil {
-		_ = pipeline.AbortSandbox(sandboxDir)
+		resumes.Park(sess.PeerPublicKey, sess.DestPath, sandboxDir, completed, resumeGracePeriod)
 		cause := extractErr
 		if cause == nil {
 			cause = recvErr
@@ -77,7 +89,7 @@ func ReceiveSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStre
 	}
 
 	if err := pipeline.CommitSandbox(sandboxDir, sess.DestPath); err != nil {
-		_ = pipeline.AbortSandbox(sandboxDir)
+		resumes.Park(sess.PeerPublicKey, sess.DestPath, sandboxDir, completed, resumeGracePeriod)
 		return publishStatus(conn, sess.ID, fmt.Errorf("commit: %w", err))
 	}
 

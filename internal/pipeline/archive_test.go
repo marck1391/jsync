@@ -3,6 +3,8 @@ package pipeline
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
@@ -31,7 +33,7 @@ func TestNewArchiveReaderDirectory(t *testing.T) {
 	root := t.TempDir()
 	writeTestTree(t, root)
 
-	ar := NewArchiveReader(root)
+	ar := NewArchiveReader(root, nil)
 	defer ar.Close()
 
 	gz, err := gzip.NewReader(ar)
@@ -74,6 +76,86 @@ func TestNewArchiveReaderDirectory(t *testing.T) {
 	}
 }
 
+// readTarEntries drains ar as a tar.gz and returns relPath -> content for
+// every regular file entry it finds.
+func readTarEntries(t *testing.T, ar io.Reader) map[string]string {
+	t.Helper()
+	gz, err := gzip.NewReader(ar)
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	tr := tar.NewReader(gz)
+
+	got := map[string]string{}
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar Next: %v", err)
+		}
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			t.Fatalf("read tar entry %s: %v", hdr.Name, err)
+		}
+		got[hdr.Name] = string(data)
+	}
+	return got
+}
+
+func hashOf(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
+}
+
+// TestNewArchiveReaderSkipsMatchingFile confirms the resume path's core
+// promise: a file whose current local content still hashes to what skip
+// says the receiver already has is omitted from the tar entirely — not
+// just re-sent redundantly.
+func TestNewArchiveReaderSkipsMatchingFile(t *testing.T) {
+	root := t.TempDir()
+	writeTestTree(t, root)
+
+	skip := map[string]string{"a.txt": hashOf("hello from a")}
+
+	ar := NewArchiveReader(root, skip)
+	defer ar.Close()
+	got := readTarEntries(t, ar)
+
+	if _, present := got["a.txt"]; present {
+		t.Error("a.txt should have been skipped (matching hash) but appeared in the archive")
+	}
+	for _, rel := range []string{"sub/b.txt", "sub/deeper/c.txt"} {
+		if _, present := got[rel]; !present {
+			t.Errorf("%s should still be in the archive (not in skip), but is missing", rel)
+		}
+	}
+}
+
+// TestNewArchiveReaderResendsChangedFile confirms skip only ever omits a
+// file it can positively confirm still matches — a stale or wrong hash
+// (the local file changed since the interrupted attempt, or the caller
+// just got it wrong) must never cause data loss by skipping something the
+// receiver doesn't actually have.
+func TestNewArchiveReaderResendsChangedFile(t *testing.T) {
+	root := t.TempDir()
+	writeTestTree(t, root)
+
+	skip := map[string]string{"a.txt": hashOf("this is not a.txt's real content")}
+
+	ar := NewArchiveReader(root, skip)
+	defer ar.Close()
+	got := readTarEntries(t, ar)
+
+	if got["a.txt"] != "hello from a" {
+		t.Errorf("a.txt should have been re-archived (hash mismatch), got %q", got["a.txt"])
+	}
+}
+
 func TestNewArchiveReaderSingleFile(t *testing.T) {
 	root := t.TempDir()
 	filePath := filepath.Join(root, "single.txt")
@@ -81,7 +163,7 @@ func TestNewArchiveReaderSingleFile(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	ar := NewArchiveReader(filePath)
+	ar := NewArchiveReader(filePath, nil)
 	defer ar.Close()
 
 	gz, err := gzip.NewReader(ar)

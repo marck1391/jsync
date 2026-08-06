@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"flag"
 	"fmt"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"filesharer/internal/daemon"
 	"filesharer/internal/handshake"
 	"filesharer/internal/identity"
+	"filesharer/internal/pipeline"
 	fsnats "filesharer/internal/transport/nats"
 )
 
@@ -99,6 +101,8 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	resumes := daemon.NewResumeRegistry()
+
 	responder := &handshake.Responder{
 		Authorized: authorized,
 		Sessions:   handshake.NewSessionStore(),
@@ -107,6 +111,9 @@ func run() error {
 		DefaultParams: handshake.Params{
 			MaxPayloadBytes: cfg.MaxPayloadBytes,
 			AllowedDestPath: cfg.AllowedDestPath,
+		},
+		ResumeLookup: func(peerPub ed25519.PublicKey, destPath string) []handshake.ResumedFile {
+			return resumes.Peek(peerPub, destPath)
 		},
 	}
 	// Handle runs synchronously inside the NATS subscription callback, so
@@ -136,7 +143,7 @@ func run() error {
 			return
 		}
 		go func() {
-			if err := daemon.ReceiveSession(ctx, node.Conn, js, sess, prekeys, id.PublicKey); err != nil {
+			if err := daemon.ReceiveSession(ctx, node.Conn, js, sess, prekeys, id.PublicKey, resumes); err != nil {
 				fmt.Fprintf(os.Stderr, "fileshared: receive session %s: %v\n", sess.ID, err)
 			}
 		}()
@@ -172,6 +179,11 @@ loop:
 			}
 		case <-watchdogTicker.C:
 			responder.Sessions.Sweep()
+			for _, sandboxDir := range resumes.Sweep(time.Now()) {
+				if err := pipeline.AbortSandbox(sandboxDir); err != nil {
+					fmt.Fprintln(os.Stderr, "fileshared: sweep abandoned resume sandbox:", err)
+				}
+			}
 		}
 	}
 
