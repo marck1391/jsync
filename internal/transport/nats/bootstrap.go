@@ -83,7 +83,10 @@ func (n *Node) LeafNodeURL() string {
 	return fmt.Sprintf("nats-leaf://%s:%d", n.leafNodeHost, n.leafNodePort)
 }
 
-// Close drains the client connection and shuts the embedded server down.
+// Close immediately closes the client connection and shuts the embedded
+// server down, with no regard for in-flight replies. Fine for tests and
+// abrupt teardown; a running daemon reacting to SIGTERM/SIGINT should use
+// Drain instead (Fase 4 "Apagado Ordenado").
 func (n *Node) Close() {
 	if n.Conn != nil {
 		n.Conn.Close()
@@ -92,6 +95,34 @@ func (n *Node) Close() {
 		n.server.Shutdown()
 		n.server.WaitForShutdown()
 	}
+}
+
+// Drain lets in-flight NATS replies finish (Fase 4 "Apagado Ordenado") before
+// tearing the node down: subscriptions stop accepting new work immediately,
+// but a request already dispatched to a handler gets to call msg.Respond()
+// and have it actually leave the socket before the connection closes. This
+// is what a running daemon should call on SIGTERM/SIGINT — Close is for
+// tests and abrupt teardown only.
+//
+// nc.Drain() itself is asynchronous (it self-enforces nats.Conn's own
+// DrainTimeout internally and closes the connection when done), so this
+// polls IsClosed() up to timeout and then shuts the embedded server down
+// regardless — best-effort, not a hard guarantee draining finished.
+func (n *Node) Drain(timeout time.Duration) error {
+	if n.Conn != nil {
+		if err := n.Conn.Drain(); err != nil {
+			return fmt.Errorf("nats: drain client connection: %w", err)
+		}
+		deadline := time.Now().Add(timeout)
+		for !n.Conn.IsClosed() && time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if n.server != nil {
+		n.server.Shutdown()
+		n.server.WaitForShutdown()
+	}
+	return nil
 }
 
 // readyTimeout bounds how long Bootstrap waits for the embedded server to

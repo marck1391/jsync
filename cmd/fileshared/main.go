@@ -5,15 +5,142 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"filesharer/internal/config"
+	"filesharer/internal/crypto/x3dh"
+	"filesharer/internal/handshake"
+	"filesharer/internal/identity"
+	fsnats "filesharer/internal/transport/nats"
 )
 
+// prekeySaveInterval bounds how long a crash (not a graceful shutdown,
+// which always saves) can leave a consumed One-Time PreKey looking
+// unconsumed on disk — see Fase 1 "Notas de Implementación" for why this
+// matters: replaying a One-Time PreKey after a crash-restart quietly loses
+// the property that makes it "one-time".
+const prekeySaveInterval = 10 * time.Second
+
+// drainTimeout bounds the graceful shutdown described in Fase 4 "Apagado
+// Ordenado".
+const drainTimeout = 10 * time.Second
+
 func main() {
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "fileshared:", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	cfgPath := flag.String("config", "config.yaml", "path to daemon config file")
 	flag.Parse()
 
-	fmt.Fprintf(os.Stdout, "fileshared: scaffold only — config=%s\n", *cfgPath)
-	fmt.Fprintln(os.Stdout, "not yet wired: config load, NATS hub/peer bootstrap, handshake responder, stream consumer, watcher")
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	machineID := cfg.MachineID
+	if machineID == "" {
+		machineID, err = identity.NewMachineID()
+		if err != nil {
+			return fmt.Errorf("generate machine id: %w", err)
+		}
+	}
+
+	id, err := identity.Load(cfg.IdentityPath, machineID)
+	if err != nil {
+		return fmt.Errorf("load identity: %w", err)
+	}
+
+	authorized, err := identity.LoadAuthorizedClients(cfg.AuthorizedClientsPath)
+	if err != nil {
+		return fmt.Errorf("load authorized_clients: %w", err)
+	}
+
+	prekeys, err := x3dh.LoadStore(cfg.PrekeysPath, id.PublicKey, id.PrivateKey, cfg.OneTimePreKeyCount)
+	if err != nil {
+		return fmt.Errorf("load prekeys: %w", err)
+	}
+
+	role := fsnats.RoleHub
+	if cfg.Role == config.RolePeer {
+		role = fsnats.RolePeer
+	}
+	node, err := fsnats.Bootstrap(fsnats.Config{
+		Role:              role,
+		Host:              cfg.Host,
+		Port:              cfg.Port,
+		LeafNodePort:      cfg.LeafNodePort,
+		HubLeafNodeURL:    cfg.HubLeafNodeURL,
+		JetStreamStoreDir: cfg.JetStreamStoreDir,
+		Debug:             cfg.Debug,
+	})
+	if err != nil {
+		return fmt.Errorf("bootstrap nats (%s): %w", cfg.Role, err)
+	}
+
+	responder := &handshake.Responder{
+		Authorized: authorized,
+		Sessions:   handshake.NewSessionStore(),
+		Prekeys:    prekeys,
+		Guard:      handshake.NewReplayGuard(),
+		DefaultParams: handshake.Params{
+			MaxPayloadBytes: cfg.MaxPayloadBytes,
+			AllowedDestPath: cfg.AllowedDestPath,
+		},
+	}
+
+	sub, err := fsnats.ServeHandshake(node.Conn, id.MachineID, responder)
+	if err != nil {
+		node.Close()
+		return fmt.Errorf("serve handshake: %w", err)
+	}
+
+	fmt.Println("fileshared: ready")
+	fmt.Println("  machine_id:", id.MachineID)
+	fmt.Println("  role:", cfg.Role)
+	fmt.Println("  client_url:", node.ClientURL())
+	if cfg.Role == config.RoleHub {
+		fmt.Println("  leaf_node_url:", node.LeafNodeURL())
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	saveTicker := time.NewTicker(prekeySaveInterval)
+	defer saveTicker.Stop()
+	watchdogTicker := time.NewTicker(1 * time.Minute)
+	defer watchdogTicker.Stop()
+
+loop:
+	for {
+		select {
+		case <-ctx.Done():
+			break loop
+		case <-saveTicker.C:
+			if err := prekeys.Save(cfg.PrekeysPath); err != nil {
+				fmt.Fprintln(os.Stderr, "fileshared: save prekeys:", err)
+			}
+		case <-watchdogTicker.C:
+			responder.Sessions.Sweep()
+		}
+	}
+
+	fmt.Println("fileshared: shutting down")
+	_ = sub.Unsubscribe()
+	if err := prekeys.Save(cfg.PrekeysPath); err != nil {
+		fmt.Fprintln(os.Stderr, "fileshared: save prekeys on shutdown:", err)
+	}
+	if err := node.Drain(drainTimeout); err != nil {
+		fmt.Fprintln(os.Stderr, "fileshared: drain:", err)
+	}
+	return nil
 }
