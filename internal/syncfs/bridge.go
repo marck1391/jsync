@@ -15,22 +15,32 @@ import (
 // eventFetchTimeout bounds how long ReceiveChanges blocks per Fetch call.
 // Unlike Fase 2's chunkFetchTimeout, a timeout here is not an error — a
 // live Watcher session can sit idle indefinitely between edits — it's just
-// how often the loop wakes up to check ctx.
-const eventFetchTimeout = 30 * time.Second
+// how often the loop wakes up to check ctx. That check matters more than it
+// looks: jetstream.Consumer.Fetch takes no context of its own, so ctx
+// cancellation is only ever noticed between Fetch calls, never during one
+// — kept short (rather than matching chunkFetchTimeout's 30s) specifically
+// so Ctrl+C on a `watch` session that's just sitting idle doesn't take up
+// to 30 seconds to actually exit.
+const eventFetchTimeout = 2 * time.Second
 
 // PublishChanges drains changes (from a watch.FileWatcher on root) and
 // publishes each as an Event to subject, tagged with machineID as Origin,
 // until changes closes or ctx is done. Events EchoGuard recognizes as this
 // node's own recent Apply (Fase 5's echo-loop guard) are dropped instead
-// of published.
-func PublishChanges(ctx context.Context, js jetstream.JetStream, subject, machineID, root string, changes <-chan watch.ChangeEvent, echo *EchoGuard) error {
+// of published. Every OpWrite is stamped with a fresh VersionVector from
+// versions (Fase 5 §2's conflict detection) — OpRemove/OpRename are not
+// version-vector-tracked yet, a documented scope reduction: the write/write
+// conflict (two nodes editing the same file) is the common, important
+// case; remove-vs-edit conflicts need different semantics and are left for
+// later.
+func PublishChanges(ctx context.Context, js jetstream.JetStream, subject, machineID, root string, changes <-chan watch.ChangeEvent, echo *EchoGuard, versions *VersionStore) error {
 	for {
 		select {
 		case cev, ok := <-changes:
 			if !ok {
 				return nil
 			}
-			if err := publishOne(ctx, js, subject, machineID, root, cev, echo); err != nil {
+			if err := publishOne(ctx, js, subject, machineID, root, cev, echo, versions); err != nil {
 				return err
 			}
 		case <-ctx.Done():
@@ -39,7 +49,7 @@ func PublishChanges(ctx context.Context, js jetstream.JetStream, subject, machin
 	}
 }
 
-func publishOne(ctx context.Context, js jetstream.JetStream, subject, machineID, root string, cev watch.ChangeEvent, echo *EchoGuard) error {
+func publishOne(ctx context.Context, js jetstream.JetStream, subject, machineID, root string, cev watch.ChangeEvent, echo *EchoGuard, versions *VersionStore) error {
 	switch cev.Kind {
 	case watch.ChangeRescan:
 		// Fase 5's initial-reconciliation story isn't implemented yet (see
@@ -61,7 +71,8 @@ func publishOne(ctx context.Context, js jetstream.JetStream, subject, machineID,
 		if echo.IsEcho(cev.RelPath, hash) {
 			return nil
 		}
-		return publish(ctx, js, subject, Event{Origin: machineID, Op: OpWrite, RelPath: cev.RelPath, ContentHash: hash, Data: data})
+		version := versions.Bump(cev.RelPath, machineID)
+		return publish(ctx, js, subject, Event{Origin: machineID, Op: OpWrite, RelPath: cev.RelPath, ContentHash: hash, Data: data, Version: version})
 
 	case watch.ChangeRemoved:
 		if echo.IsEchoRemove(cev.RelPath) {
@@ -97,9 +108,18 @@ func publish(ctx context.Context, js jetstream.JetStream, subject string, ev Eve
 // published itself. Applied writes/removals are recorded into echo so the
 // local Watcher on destRoot (if any — this node may be watching destRoot
 // too, in a bidirectional sync) recognizes them instead of re-publishing.
+//
+// Every OpWrite is checked against versions before being applied (Fase 5
+// §2). A genuine conflict — both sides wrote without having seen the
+// other's change — is never silently resolved: the incoming content is
+// written aside via ApplyConflict instead of overwriting the local file,
+// and onConflict (if non-nil) is called so the caller can surface it (log,
+// notify, etc.) — this package does no I/O beyond the filesystem itself,
+// so it never prints or logs on its own.
+//
 // Runs until ctx is done or a Fetch/Apply error is unrecoverable; an empty
 // Fetch (nothing new) is normal idle behavior, not an error.
-func ReceiveChanges(ctx context.Context, cons jetstream.Consumer, machineID, destRoot string, echo *EchoGuard) error {
+func ReceiveChanges(ctx context.Context, cons jetstream.Consumer, machineID, destRoot string, echo *EchoGuard, versions *VersionStore, onConflict func(ev Event, conflictPath string)) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -122,6 +142,33 @@ func ReceiveChanges(ctx context.Context, cons jetstream.Consumer, machineID, des
 			if ev.Origin == machineID {
 				_ = msg.Ack() // our own publish, echoed back by the shared stream — nothing to apply
 				continue
+			}
+
+			if ev.Op == OpWrite {
+				safe, conflict := versions.Reconcile(ev.RelPath, ev.Version)
+				if conflict {
+					conflictPath, cErr := ApplyConflict(ev, destRoot)
+					if cErr != nil {
+						_ = msg.Nak()
+						return fmt.Errorf("syncfs: write conflict file for %s: %w", ev.RelPath, cErr)
+					}
+					if onConflict != nil {
+						onConflict(ev, conflictPath)
+					}
+					if err := msg.Ack(); err != nil {
+						return fmt.Errorf("syncfs: ack event: %w", err)
+					}
+					continue
+				}
+				if !safe {
+					// Stale: a re-delivery or an update we've already
+					// causally seen a newer version of. Ack and move on —
+					// nothing to apply, and it's not an error.
+					if err := msg.Ack(); err != nil {
+						return fmt.Errorf("syncfs: ack event: %w", err)
+					}
+					continue
+				}
 			}
 
 			if err := Apply(ev, destRoot); err != nil {

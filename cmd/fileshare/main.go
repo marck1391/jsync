@@ -375,11 +375,20 @@ func cmdWatch(args []string) error {
 	}()
 
 	echo := syncfs.NewEchoGuard()
+	versions := syncfs.NewVersionStore()
 	subject := fsnats.EventsSubject(resp.SessionID)
 
+	onConflict := func(ev syncfs.Event, conflictPath string) {
+		fmt.Fprintf(os.Stderr, "fileshare watch: conflict on %s, wrote %s — resolve manually\n", ev.RelPath, conflictPath)
+	}
+
 	errCh := make(chan error, 2)
-	go func() { errCh <- syncfs.PublishChanges(ctx, js, subject, id.MachineID, localPath, changes, echo) }()
-	go func() { errCh <- syncfs.ReceiveChanges(ctx, cons, id.MachineID, localPath, echo) }()
+	go func() {
+		errCh <- syncfs.PublishChanges(ctx, js, subject, id.MachineID, localPath, changes, echo, versions)
+	}()
+	go func() {
+		errCh <- syncfs.ReceiveChanges(ctx, cons, id.MachineID, localPath, echo, versions, onConflict)
+	}()
 
 	fmt.Printf("watching %s <-> %s:%s (Ctrl+C to stop)\n", localPath, targetMachineID, destPath)
 

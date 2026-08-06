@@ -87,8 +87,9 @@ func TestUnidirectionalPropagation(t *testing.T) {
 	}()
 
 	srcEcho := syncfs.NewEchoGuard()
+	srcVersions := syncfs.NewVersionStore()
 	go func() {
-		if err := syncfs.PublishChanges(ctx, js, subject, "node-src", srcRoot, changes, srcEcho); err != nil && ctx.Err() == nil {
+		if err := syncfs.PublishChanges(ctx, js, subject, "node-src", srcRoot, changes, srcEcho, srcVersions); err != nil && ctx.Err() == nil {
 			t.Logf("PublishChanges: %v", err)
 		}
 	}()
@@ -98,8 +99,9 @@ func TestUnidirectionalPropagation(t *testing.T) {
 		t.Fatalf("EnsureEventsConsumer: %v", err)
 	}
 	destEcho := syncfs.NewEchoGuard()
+	destVersions := syncfs.NewVersionStore()
 	go func() {
-		if err := syncfs.ReceiveChanges(ctx, destCons, "node-dest", destRoot, destEcho); err != nil && ctx.Err() == nil {
+		if err := syncfs.ReceiveChanges(ctx, destCons, "node-dest", destRoot, destEcho, destVersions, nil); err != nil && ctx.Err() == nil {
 			t.Logf("ReceiveChanges: %v", err)
 		}
 	}()
@@ -175,8 +177,9 @@ func TestBidirectionalNoEchoLoop(t *testing.T) {
 		}()
 
 		echo := syncfs.NewEchoGuard()
+		versions := syncfs.NewVersionStore()
 		go func() {
-			if err := syncfs.PublishChanges(ctx, js, subject, machineID, root, changes, echo); err != nil && ctx.Err() == nil {
+			if err := syncfs.PublishChanges(ctx, js, subject, machineID, root, changes, echo, versions); err != nil && ctx.Err() == nil {
 				t.Logf("[%s] PublishChanges: %v", machineID, err)
 			}
 		}()
@@ -186,7 +189,7 @@ func TestBidirectionalNoEchoLoop(t *testing.T) {
 			t.Fatalf("[%s] EnsureEventsConsumer: %v", machineID, err)
 		}
 		go func() {
-			if err := syncfs.ReceiveChanges(ctx, cons, machineID, root, echo); err != nil && ctx.Err() == nil {
+			if err := syncfs.ReceiveChanges(ctx, cons, machineID, root, echo, versions, nil); err != nil && ctx.Err() == nil {
 				t.Logf("[%s] ReceiveChanges: %v", machineID, err)
 			}
 		}()

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Op is the mutation kind a syncfs Event carries (Fase 5 §"Protocolo de
@@ -34,6 +35,12 @@ type Event struct {
 
 	ContentHash string `json:"content_hash,omitempty"` // hex sha256, only for OpWrite
 	Data        []byte `json:"data,omitempty"`         // only for OpWrite; large-file redirect to Fase 2 streaming is a documented follow-up, not implemented yet
+
+	// Version is RelPath's causal version vector as of this write, used to
+	// tell a genuine update from a genuine conflict (Fase 5 §2 / version.go).
+	// Only set for OpWrite — see bridge.go for why OpRemove/OpRename aren't
+	// version-vector-tracked yet.
+	Version VersionVector `json:"version,omitempty"`
 }
 
 // ContentHash returns the hex-encoded SHA-256 of data — the currency
@@ -66,6 +73,37 @@ func Apply(ev Event, destRoot string) error {
 	default:
 		return fmt.Errorf("syncfs: unknown op %q", ev.Op)
 	}
+}
+
+// ApplyConflict writes ev's content aside instead of overwriting RelPath —
+// called instead of Apply when VersionStore.Reconcile reports a genuine
+// conflict (Fase 5 §2: notification style, no silent auto-merge). Returns
+// the path it wrote to, so the caller can log/report it. The conflict file
+// lands as a plain new file under destRoot, which means this node's own
+// Watcher will pick it up and propagate it like any other write — the
+// other side ends up seeing the same conflict marker too, without any
+// special-casing needed here.
+func ApplyConflict(ev Event, destRoot string) (string, error) {
+	target, err := safePath(destRoot, ev.RelPath)
+	if err != nil {
+		return "", err
+	}
+	conflictPath := fmt.Sprintf("%s.conflict-%s-%d", target, sanitizeForFilename(ev.Origin), time.Now().Unix())
+	if err := os.MkdirAll(filepath.Dir(conflictPath), 0o755); err != nil {
+		return "", fmt.Errorf("syncfs: mkdir %s: %w", filepath.Dir(conflictPath), err)
+	}
+	if err := os.WriteFile(conflictPath, ev.Data, 0o644); err != nil {
+		return "", fmt.Errorf("syncfs: write conflict file %s: %w", conflictPath, err)
+	}
+	return conflictPath, nil
+}
+
+// sanitizeForFilename replaces path separators in a machine_id (which
+// could in principle contain them — see transport/nats.sanitizeConsumerName
+// for the same concern) so it can't turn a conflict filename into a path
+// escape.
+func sanitizeForFilename(s string) string {
+	return strings.NewReplacer("/", "_", "\\", "_").Replace(s)
 }
 
 func applyWrite(ev Event, destRoot string) error {

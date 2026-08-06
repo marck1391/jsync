@@ -45,11 +45,20 @@ func WatchSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStream
 	}()
 
 	echo := syncfs.NewEchoGuard()
+	versions := syncfs.NewVersionStore()
 	subject := fsnats.EventsSubject(sess.ID)
 
+	onConflict := func(ev syncfs.Event, conflictPath string) {
+		fmt.Fprintf(os.Stderr, "fileshared: watch session %s: conflict on %s, wrote %s — resolve manually\n", sess.ID, ev.RelPath, conflictPath)
+	}
+
 	errCh := make(chan error, 2)
-	go func() { errCh <- syncfs.PublishChanges(ctx, js, subject, localMachineID, sess.DestPath, changes, echo) }()
-	go func() { errCh <- syncfs.ReceiveChanges(ctx, cons, localMachineID, sess.DestPath, echo) }()
+	go func() {
+		errCh <- syncfs.PublishChanges(ctx, js, subject, localMachineID, sess.DestPath, changes, echo, versions)
+	}()
+	go func() {
+		errCh <- syncfs.ReceiveChanges(ctx, cons, localMachineID, sess.DestPath, echo, versions, onConflict)
+	}()
 
 	select {
 	case <-ctx.Done():
