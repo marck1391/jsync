@@ -12,7 +12,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
@@ -21,9 +23,12 @@ import (
 	"filesharer/internal/config"
 	"filesharer/internal/crypto/x3dh"
 	"filesharer/internal/daemon"
+	"filesharer/internal/handshake"
 	"filesharer/internal/identity"
 	"filesharer/internal/pipeline"
+	"filesharer/internal/syncfs"
 	fsnats "filesharer/internal/transport/nats"
+	"filesharer/internal/watch"
 )
 
 type subcommand struct {
@@ -35,8 +40,8 @@ type subcommand struct {
 var subcommands = []subcommand{
 	{"share", "fileshare share [--config path] <local-path> <target-machine-id>:<dest-path>", cmdShare},
 	{"pull", "fileshare pull <target-machine-id>:<path> <dest>", blockedOnPhase("Fase 2 (motor de streaming)")},
-	{"watch", "fileshare watch <path> <target-machine-id>:<dest-path>", blockedOnPhase("Fase 5 (watcher)")},
-	{"resolve", "fileshare resolve <conflict-file>", blockedOnPhase("Fase 5 (watcher)")},
+	{"watch", "fileshare watch [--config path] <local-path> <target-machine-id>:<dest-path>", cmdWatch},
+	{"resolve", "fileshare resolve <conflict-file>", blockedOnPhase("Fase 5 (conflictos)")},
 	{"keys", "fileshare keys [--config path] generate|show|authorize <base64-pubkey>", cmdKeys},
 }
 
@@ -224,7 +229,7 @@ func cmdShare(args []string) error {
 	}
 	defer conn.Close()
 
-	resp, err := fsnats.RequestHandshake(conn, id, targetMachineID, destPath, *timeout)
+	resp, err := fsnats.RequestHandshake(conn, id, targetMachineID, destPath, handshake.DirectionUnidirectional, *timeout)
 	if err != nil {
 		return fmt.Errorf("handshake with %s: %w", targetMachineID, err)
 	}
@@ -286,5 +291,106 @@ func cmdShare(args []string) error {
 		return nil
 	case <-time.After(*transferTimeout):
 		return fmt.Errorf("timed out after %s waiting for %s to confirm the write", *transferTimeout, targetMachineID)
+	}
+}
+
+// cmdWatch runs a live, bidirectional Fase 5 sync session: it handshakes
+// with DirectionBidirectional (fileshared's OnApproved starts a matching
+// Watcher on its own side, see cmd/fileshared), then watches localPath and
+// both publishes its own changes and applies the peer's, until interrupted
+// (Ctrl+C / SIGTERM). Unlike cmdShare there is no Fase 3 encryption yet —
+// internal/syncfs's Event has no cipher fields — and no initial
+// reconciliation: it only reacts to changes from the moment it starts.
+func cmdWatch(args []string) error {
+	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+	cfgPath := fs.String("config", "config.yaml", "path to daemon config file")
+	timeout := fs.Duration("timeout", 10*time.Second, "handshake timeout")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) != 2 {
+		return fmt.Errorf("usage: fileshare watch [--config path] <local-path> <target-machine-id>:<dest-path>")
+	}
+	localPath, target := rest[0], rest[1]
+
+	targetMachineID, destPath, ok := strings.Cut(target, ":")
+	if !ok || targetMachineID == "" || destPath == "" {
+		return fmt.Errorf("target must be <machine-id>:<dest-path>, got %q", target)
+	}
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return fmt.Errorf("local path: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("local path %q must be a directory for watch", localPath)
+	}
+
+	cfg, id, err := loadLocalIdentity(*cfgPath)
+	if err != nil {
+		return err
+	}
+
+	brokerURL := fmt.Sprintf("nats://%s:%d", cfg.Host, cfg.Port)
+	conn, err := natsgo.Connect(brokerURL)
+	if err != nil {
+		return fmt.Errorf("connect to local fileshared at %s: %w", brokerURL, err)
+	}
+	defer conn.Close()
+
+	resp, err := fsnats.RequestHandshake(conn, id, targetMachineID, destPath, handshake.DirectionBidirectional, *timeout)
+	if err != nil {
+		return fmt.Errorf("handshake with %s: %w", targetMachineID, err)
+	}
+	if !resp.Approved {
+		return fmt.Errorf("handshake rejected by %s: %s", targetMachineID, resp.Reason)
+	}
+	if !resp.VerifyBundle() {
+		return fmt.Errorf("handshake approved but %s's prekey bundle failed to verify — refusing to continue", targetMachineID)
+	}
+	fmt.Println("handshake approved, session_id:", resp.SessionID)
+
+	js, err := jetstream.New(conn)
+	if err != nil {
+		return fmt.Errorf("init jetstream: %w", err)
+	}
+	if _, err := fsnats.EnsureEventsStream(context.Background(), js, resp.SessionID); err != nil {
+		return fmt.Errorf("ensure events stream: %w", err)
+	}
+	cons, err := fsnats.EnsureEventsConsumer(context.Background(), js, resp.SessionID, id.MachineID)
+	if err != nil {
+		return fmt.Errorf("ensure events consumer: %w", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	fw := watch.NewFileWatcher(watch.DefaultDebounce, watch.DefaultBufferSize)
+	changes, watchErrs := fw.Watch(ctx, localPath)
+	defer fw.Close()
+	go func() {
+		for werr := range watchErrs {
+			fmt.Fprintln(os.Stderr, "fileshare watch: local watch error:", werr)
+		}
+	}()
+
+	echo := syncfs.NewEchoGuard()
+	subject := fsnats.EventsSubject(resp.SessionID)
+
+	errCh := make(chan error, 2)
+	go func() { errCh <- syncfs.PublishChanges(ctx, js, subject, id.MachineID, localPath, changes, echo) }()
+	go func() { errCh <- syncfs.ReceiveChanges(ctx, cons, id.MachineID, localPath, echo) }()
+
+	fmt.Printf("watching %s <-> %s:%s (Ctrl+C to stop)\n", localPath, targetMachineID, destPath)
+
+	select {
+	case <-ctx.Done():
+		fmt.Println("fileshare watch: stopping")
+		return nil
+	case err := <-errCh:
+		if err != nil && ctx.Err() == nil {
+			return fmt.Errorf("watch session ended: %w", err)
+		}
+		return nil
 	}
 }

@@ -21,11 +21,13 @@ type Responder struct {
 	Prekeys    *x3dh.Store
 	Guard      *ReplayGuard
 
-	// DefaultParams seeds new sessions; real values come from Fase 4's
-	// config (max payload, allowed dest root, watcher vs. one-shot, etc.).
-	// An empty AllowedDestPath means "no restriction" — an explicit
-	// operator choice to leave the destination root unconstrained, not an
-	// oversight.
+	// DefaultParams seeds new sessions with this daemon's policy (max
+	// payload, allowed dest root); Handle overrides Direction from what
+	// the initiator actually requested (Request.RequestedDirection) rather
+	// than using DefaultParams.Direction, since that's a per-request
+	// choice, not a daemon-wide one. An empty AllowedDestPath means "no
+	// restriction" — an explicit operator choice to leave the destination
+	// root unconstrained, not an oversight.
 	DefaultParams Params
 
 	// OnApproved, if set, is called synchronously from within Handle right
@@ -56,7 +58,10 @@ func (r *Responder) Handle(req *Request) *Response {
 		}
 	}
 
-	sess, err := r.Sessions.Create(req.MachineID, ed25519.PublicKey(req.PublicKey), r.DefaultParams, req.RequestedDestPath)
+	params := r.DefaultParams
+	params.Direction = req.RequestedDirection
+
+	sess, err := r.Sessions.Create(req.MachineID, ed25519.PublicKey(req.PublicKey), params, req.RequestedDestPath)
 	if err != nil {
 		return &Response{Approved: false, Reason: err.Error()}
 	}

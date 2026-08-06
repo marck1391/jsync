@@ -110,14 +110,27 @@ func run() error {
 		},
 	}
 	// Handle runs synchronously inside the NATS subscription callback, so
-	// OnApproved must not block it on the actual (potentially slow) byte
-	// transfer — hence the goroutine for daemon.ReceiveSession. Creating
-	// the stream itself stays synchronous and runs before Handle's
-	// Response goes out, though: the initiator only learns the session was
-	// approved once this returns, and if it started publishing chunks
-	// before the stream existed, JetStream would have nothing to accept
-	// them into.
+	// OnApproved must not block it on the actual (potentially slow, or for
+	// a watch session, unboundedly long-lived) work — hence the goroutines
+	// below. Creating the Fase 2 stream itself stays synchronous and runs
+	// before Handle's Response goes out, though: the initiator only learns
+	// the session was approved once this returns, and if it started
+	// publishing chunks before the stream existed, JetStream would have
+	// nothing to accept them into. A watch session's events stream doesn't
+	// need this same synchronous guarantee — WatchSession creates it
+	// itself before the initiator's own Watcher could plausibly publish
+	// anything, since the initiator side has its own network round trip
+	// (EnsureEventsStream) to do first too.
 	responder.OnApproved = func(sess *handshake.Session) {
+		if sess.Params.Direction == handshake.DirectionBidirectional {
+			go func() {
+				if err := daemon.WatchSession(ctx, node.Conn, js, sess, id.MachineID); err != nil {
+					fmt.Fprintf(os.Stderr, "fileshared: watch session %s: %v\n", sess.ID, err)
+				}
+			}()
+			return
+		}
+
 		if _, err := fsnats.EnsureStream(ctx, js, sess.ID); err != nil {
 			fmt.Fprintf(os.Stderr, "fileshared: ensure stream for session %s: %v\n", sess.ID, err)
 			return

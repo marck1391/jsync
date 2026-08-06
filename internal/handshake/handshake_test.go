@@ -52,7 +52,7 @@ func TestHandshakeHappyPath(t *testing.T) {
 	}
 	responder, responderID := newTestResponder(t, initiator)
 
-	req, err := BuildRequest(initiator, "/home/user/workspace/incoming")
+	req, err := BuildRequest(initiator, "/home/user/workspace/incoming", DirectionUnidirectional)
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}
@@ -81,6 +81,38 @@ func TestHandshakeHappyPath(t *testing.T) {
 	if sess.DestPath != "/home/user/workspace/incoming" {
 		t.Errorf("DestPath = %q, want %q", sess.DestPath, "/home/user/workspace/incoming")
 	}
+	if sess.Params.Direction != DirectionUnidirectional {
+		t.Errorf("Direction = %v, want DirectionUnidirectional", sess.Params.Direction)
+	}
+}
+
+func TestHandshakeHonorsRequestedDirection(t *testing.T) {
+	initiator, err := identity.Generate("initiator-machine")
+	if err != nil {
+		t.Fatalf("Generate initiator: %v", err)
+	}
+	responder, _ := newTestResponder(t, initiator)
+
+	req, err := BuildRequest(initiator, "/home/user/workspace/watched", DirectionBidirectional)
+	if err != nil {
+		t.Fatalf("BuildRequest: %v", err)
+	}
+
+	resp := responder.Handle(req)
+	if !resp.Approved {
+		t.Fatalf("Handle: expected approval, got rejection: %s", resp.Reason)
+	}
+	if resp.Params.Direction != DirectionBidirectional {
+		t.Errorf("Response Params.Direction = %v, want DirectionBidirectional", resp.Params.Direction)
+	}
+
+	sess, ok := responder.Sessions.Get(resp.SessionID)
+	if !ok {
+		t.Fatal("Sessions.Get: session was not registered")
+	}
+	if sess.Params.Direction != DirectionBidirectional {
+		t.Errorf("Session Params.Direction = %v, want DirectionBidirectional", sess.Params.Direction)
+	}
 }
 
 func TestHandshakeRejectsDestPathOutsideAllowedRoot(t *testing.T) {
@@ -90,7 +122,7 @@ func TestHandshakeRejectsDestPathOutsideAllowedRoot(t *testing.T) {
 	}
 	responder, _ := newTestResponder(t, initiator)
 
-	req, err := BuildRequest(initiator, "/home/user/workspace-evil/payload")
+	req, err := BuildRequest(initiator, "/home/user/workspace-evil/payload", DirectionUnidirectional)
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}
@@ -109,7 +141,7 @@ func TestHandshakeRejectsUnauthorizedClient(t *testing.T) {
 	// No trust: pass nil so the initiator's key is never added.
 	responder, _ := newTestResponder(t, nil)
 
-	req, err := BuildRequest(initiator, "")
+	req, err := BuildRequest(initiator, "", DirectionUnidirectional)
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}
@@ -130,7 +162,7 @@ func TestHandshakeRejectsReplay(t *testing.T) {
 	}
 	responder, _ := newTestResponder(t, initiator)
 
-	req, err := BuildRequest(initiator, "/home/user/workspace/incoming")
+	req, err := BuildRequest(initiator, "/home/user/workspace/incoming", DirectionUnidirectional)
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}
@@ -182,7 +214,7 @@ func TestHandshakeRejectsTamperedSignature(t *testing.T) {
 	}
 	responder, _ := newTestResponder(t, initiator)
 
-	req, err := BuildRequest(initiator, "")
+	req, err := BuildRequest(initiator, "", DirectionUnidirectional)
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}
@@ -201,7 +233,7 @@ func TestHandshakeRejectsProtocolVersionMismatch(t *testing.T) {
 	}
 	responder, _ := newTestResponder(t, initiator)
 
-	req, err := BuildRequest(initiator, "")
+	req, err := BuildRequest(initiator, "", DirectionUnidirectional)
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}

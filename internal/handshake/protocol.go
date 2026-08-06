@@ -29,20 +29,29 @@ type Request struct {
 	// out of stream metadata.
 	RequestedDestPath string `json:"requested_dest_path"`
 
+	// RequestedDirection tells the responder whether this is a one-shot
+	// `share` (Fase 2) or a live `watch` session (Fase 5) — the responder
+	// copies it into the approved Session's Params.Direction, and
+	// Fase 4's OnApproved branches on that to start either a Fase 2
+	// receive or a Fase 5 watcher on RequestedDestPath.
+	RequestedDirection Direction `json:"requested_direction"`
+
 	Signature []byte `json:"signature"` // over SignedPayload()
 }
 
 // SignedPayload returns the exact bytes the requester signs and the
 // responder re-derives to verify. Beyond the Timestamp + Nonce called out
-// in Fase 1 §3 step 1, it also binds MachineID and RequestedDestPath
-// (length-prefixed, since both are variable-length) and PublicKey into the
-// signature: leaving any of those out would let a relay rewrite them in
-// transit without invalidating the signature, since they're the only
-// fields here not otherwise bound to the verification key. RequestedDestPath
-// in particular matters — an unsigned destination path is a relay's
-// invitation to redirect where an approved transfer writes on disk.
+// in Fase 1 §3 step 1, it also binds MachineID, RequestedDestPath, and
+// RequestedDirection (length-prefixed where variable-length) and PublicKey
+// into the signature: leaving any of those out would let a relay rewrite
+// them in transit without invalidating the signature, since they're the
+// only fields here not otherwise bound to the verification key.
+// RequestedDestPath in particular matters — an unsigned destination path
+// is a relay's invitation to redirect where an approved transfer writes on
+// disk. RequestedDirection matters too, if quieter: it decides whether the
+// responder starts a one-shot receive or a standing Watcher on that path.
 func (r *Request) SignedPayload() []byte {
-	buf := make([]byte, 0, 4+8+len(r.Nonce)+4+len(r.MachineID)+4+len(r.RequestedDestPath)+len(r.PublicKey))
+	buf := make([]byte, 0, 4+8+len(r.Nonce)+4+len(r.MachineID)+4+len(r.RequestedDestPath)+4+len(r.PublicKey))
 	buf = binary.BigEndian.AppendUint32(buf, uint32(r.ProtocolVersion))
 	buf = binary.BigEndian.AppendUint64(buf, uint64(r.Timestamp.UnixNano()))
 	buf = append(buf, r.Nonce[:]...)
@@ -50,13 +59,15 @@ func (r *Request) SignedPayload() []byte {
 	buf = append(buf, r.MachineID...)
 	buf = binary.BigEndian.AppendUint32(buf, uint32(len(r.RequestedDestPath)))
 	buf = append(buf, r.RequestedDestPath...)
+	buf = binary.BigEndian.AppendUint32(buf, uint32(r.RequestedDirection))
 	buf = append(buf, r.PublicKey...)
 	return buf
 }
 
 // Direction records whether a session is a one-shot unidirectional transfer
 // (Fase 2) or a bidirectional watcher session (Fase 5) — it drives which
-// NATS subject permissions get granted for the session (Capa 2).
+// NATS subject permissions get granted for the session (Capa 2), and which
+// of Fase 4's OnApproved branches runs.
 type Direction int
 
 const (

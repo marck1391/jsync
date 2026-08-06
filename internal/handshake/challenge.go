@@ -25,22 +25,24 @@ var (
 )
 
 // BuildRequest signs a new challenge as id, requesting destPath as the
-// Fase 2 write target (Fase 1 §3 step 1). Pass an empty destPath for a
-// handshake that isn't about to stream anything to disk (none exist yet,
+// write target and direction as either a one-shot Fase 2 transfer or a
+// standing Fase 5 Watcher (Fase 1 §3 step 1). Pass an empty destPath for a
+// handshake that isn't about to write anything to disk (none exist yet,
 // but nothing here requires it to be non-empty).
-func BuildRequest(id *identity.Identity, destPath string) (*Request, error) {
+func BuildRequest(id *identity.Identity, destPath string, direction Direction) (*Request, error) {
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, fmt.Errorf("handshake: generate nonce: %w", err)
 	}
 
 	req := &Request{
-		ProtocolVersion:   ProtocolVersion,
-		MachineID:         id.MachineID,
-		PublicKey:         []byte(id.PublicKey),
-		Timestamp:         time.Now().UTC(),
-		Nonce:             nonce,
-		RequestedDestPath: destPath,
+		ProtocolVersion:    ProtocolVersion,
+		MachineID:          id.MachineID,
+		PublicKey:          []byte(id.PublicKey),
+		Timestamp:          time.Now().UTC(),
+		Nonce:              nonce,
+		RequestedDestPath:  destPath,
+		RequestedDirection: direction,
 	}
 	req.Signature = id.Sign(req.SignedPayload())
 	return req, nil

@@ -39,10 +39,11 @@ func ServeHandshake(conn *natsgo.Conn, machineID string, r *handshake.Responder)
 // RequestHandshake builds and signs a Fase 1 Request as id, sends it to
 // targetMachineID's handshake subject, and waits up to timeout for a
 // Response (Fase 1 §3 step 1: "abre un reloj de espera de 5 segundos").
-// destPath is what Fase 2 will write to on the responder if it approves —
-// pass "" for a handshake that isn't about to stream anything.
-func RequestHandshake(conn *natsgo.Conn, id *identity.Identity, targetMachineID, destPath string, timeout time.Duration) (*handshake.Response, error) {
-	req, err := handshake.BuildRequest(id, destPath)
+// destPath is what Fase 2/5 will write to on the responder if it approves —
+// pass "" for a handshake that isn't about to write anything. direction
+// distinguishes a one-shot `share` from a standing `watch` session.
+func RequestHandshake(conn *natsgo.Conn, id *identity.Identity, targetMachineID, destPath string, direction handshake.Direction, timeout time.Duration) (*handshake.Response, error) {
+	req, err := handshake.BuildRequest(id, destPath, direction)
 	if err != nil {
 		return nil, err
 	}
