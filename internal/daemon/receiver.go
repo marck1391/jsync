@@ -80,16 +80,28 @@ func ReceiveSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStre
 	recvErr := <-recvDone
 
 	if extractErr != nil || recvErr != nil {
-		resumes.Park(sess.PeerPublicKey, sess.DestPath, sandboxDir, completed, resumeGracePeriod)
 		cause := extractErr
 		if cause == nil {
 			cause = recvErr
+		}
+		// Disk-full is the one failure this package doesn't park for
+		// resume (Fase 4's original error table, and CLAUDE.md's "Siguientes
+		// pasos"): retaining a half-received sandbox on an already-full
+		// disk only makes the next attempt's job harder, not easier.
+		if isDiskFull(cause) {
+			_ = pipeline.AbortSandbox(sandboxDir)
+		} else {
+			resumes.Park(sess.PeerPublicKey, sess.DestPath, sandboxDir, completed, resumeGracePeriod)
 		}
 		return publishStatus(conn, sess.ID, fmt.Errorf("receive/extract: %w", cause))
 	}
 
 	if err := pipeline.CommitSandbox(sandboxDir, sess.DestPath); err != nil {
-		resumes.Park(sess.PeerPublicKey, sess.DestPath, sandboxDir, completed, resumeGracePeriod)
+		if isDiskFull(err) {
+			_ = pipeline.AbortSandbox(sandboxDir)
+		} else {
+			resumes.Park(sess.PeerPublicKey, sess.DestPath, sandboxDir, completed, resumeGracePeriod)
+		}
 		return publishStatus(conn, sess.ID, fmt.Errorf("commit: %w", err))
 	}
 

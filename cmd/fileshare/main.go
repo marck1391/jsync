@@ -10,6 +10,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -243,12 +244,23 @@ func buildWatchEncryption(ctx context.Context, cfg *config.Config, id *identity.
 	}, nil
 }
 
+// fatalShareError marks a shareAttempt failure the retry loop in cmdShare
+// must not retry — a policy rejection or a deterministic local error, not
+// a transient network one. Retrying either would just be noisy, not
+// resilient: the outcome would be identical every time.
+type fatalShareError struct{ err error }
+
+func (e *fatalShareError) Error() string { return e.err.Error() }
+func (e *fatalShareError) Unwrap() error { return e.err }
+
 func cmdShare(args []string) error {
 	fs := flag.NewFlagSet("share", flag.ContinueOnError)
 	cfgPath := fs.String("config", "config.yaml", "path to daemon config file")
 	timeout := fs.Duration("timeout", 10*time.Second, "handshake timeout")
 	transferTimeout := fs.Duration("transfer-timeout", 2*time.Minute, "how long to wait for the transfer to finish after the handshake is approved")
 	encrypt := fs.Bool("encrypt", false, "end-to-end encrypt the transfer (Fase 3: X3DH + Double Ratchet, chunk contents unreadable to the NATS broker)")
+	retries := fs.Int("retries", 2, "extra attempts (beyond the first) if a transfer fails for a retryable reason — network recovery (Fase 2) means a retry resumes automatically, skipping whatever the destination already has. 0 disables automatic retry")
+	retryWait := fs.Duration("retry-wait", 3*time.Second, "how long to wait before an automatic retry")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -286,23 +298,58 @@ func cmdShare(args []string) error {
 	}
 	defer conn.Close()
 
-	resp, err := fsnats.RequestHandshake(conn, id, targetMachineID, destPath, handshake.DirectionUnidirectional, false, *timeout)
-	if err != nil {
-		return fmt.Errorf("handshake with %s: %w", targetMachineID, err)
-	}
-	if !resp.Approved {
-		return fmt.Errorf("handshake rejected by %s: %s", targetMachineID, resp.Reason)
-	}
-	if !resp.VerifyBundle() {
-		return fmt.Errorf("handshake approved but %s's prekey bundle failed to verify — refusing to continue", targetMachineID)
-	}
-
-	fmt.Println("handshake approved, session_id:", resp.SessionID)
-
 	js, err := jetstream.New(conn)
 	if err != nil {
 		return fmt.Errorf("init jetstream: %w", err)
 	}
+
+	maxAttempts := *retries + 1
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		err := shareAttempt(conn, js, cfg, id, srcPath, targetMachineID, destPath, *encrypt, *timeout, *transferTimeout)
+		if err == nil {
+			return nil
+		}
+
+		var fatal *fatalShareError
+		if errors.As(err, &fatal) {
+			return fatal.err
+		}
+
+		lastErr = err
+		if attempt < maxAttempts {
+			fmt.Printf("attempt %d/%d failed: %v — retrying in %s\n", attempt, maxAttempts, err, *retryWait)
+			time.Sleep(*retryWait)
+		}
+	}
+	return fmt.Errorf("gave up after %d attempt(s): %w", maxAttempts, lastErr)
+}
+
+// shareAttempt runs one full handshake-through-completion cycle of `share`.
+// A non-nil error is either a *fatalShareError (cmdShare's retry loop must
+// stop immediately — a policy rejection or a deterministic local failure,
+// retrying changes nothing) or a plain error (worth retrying — a transport
+// failure, the daemon reporting the transfer didn't finish, or timing out
+// waiting to hear back, all of which a network blip or a momentarily busy
+// peer can plausibly cause). Every attempt is a fresh handshake — never a
+// reused SessionID — but if the destination has a parked sandbox from an
+// earlier attempt against this same peer+destPath (Fase 2 network
+// recovery), the daemon reports it via resp.ResumedFiles regardless of
+// which attempt asks, so a retry here automatically skips what's already
+// there without any extra bookkeeping in this function.
+func shareAttempt(conn *natsgo.Conn, js jetstream.JetStream, cfg *config.Config, id *identity.Identity, srcPath, targetMachineID, destPath string, encrypt bool, timeout, transferTimeout time.Duration) error {
+	resp, err := fsnats.RequestHandshake(conn, id, targetMachineID, destPath, handshake.DirectionUnidirectional, false, timeout)
+	if err != nil {
+		return fmt.Errorf("handshake with %s: %w", targetMachineID, err)
+	}
+	if !resp.Approved {
+		return &fatalShareError{fmt.Errorf("handshake rejected by %s: %s", targetMachineID, resp.Reason)}
+	}
+	if !resp.VerifyBundle() {
+		return &fatalShareError{fmt.Errorf("handshake approved but %s's prekey bundle failed to verify — refusing to continue", targetMachineID)}
+	}
+
+	fmt.Println("handshake approved, session_id:", resp.SessionID)
 
 	// Subscribe to the completion status before publishing a single byte —
 	// the daemon could in principle finish before we'd get around to
@@ -321,10 +368,10 @@ func cmdShare(args []string) error {
 	defer statusSub.Unsubscribe()
 
 	var enc *pipeline.Encryption
-	if *encrypt {
+	if encrypt {
 		enc, err = buildEncryption(cfg, id, resp.Bundle)
 		if err != nil {
-			return fmt.Errorf("set up encryption: %w", err)
+			return &fatalShareError{fmt.Errorf("set up encryption: %w", err)}
 		}
 		fmt.Println("encryption: on (X3DH + Double Ratchet)")
 	}
@@ -341,7 +388,7 @@ func cmdShare(args []string) error {
 	ar := pipeline.NewArchiveReader(srcPath, skip)
 	defer ar.Close()
 
-	pubCtx, cancel := context.WithTimeout(context.Background(), *transferTimeout)
+	pubCtx, cancel := context.WithTimeout(context.Background(), transferTimeout)
 	defer cancel()
 	if err := pipeline.PublishArchive(pubCtx, js, fsnats.StreamSubject(resp.SessionID), ar, pipeline.DefaultChunkSize, enc); err != nil {
 		return fmt.Errorf("send %s: %w", srcPath, err)
@@ -355,8 +402,8 @@ func cmdShare(args []string) error {
 		}
 		fmt.Printf("done: %s -> %s:%s\n", srcPath, targetMachineID, destPath)
 		return nil
-	case <-time.After(*transferTimeout):
-		return fmt.Errorf("timed out after %s waiting for %s to confirm the write", *transferTimeout, targetMachineID)
+	case <-time.After(transferTimeout):
+		return fmt.Errorf("timed out after %s waiting for %s to confirm the write", transferTimeout, targetMachineID)
 	}
 }
 
