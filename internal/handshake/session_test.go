@@ -14,7 +14,7 @@ func TestSessionStoreCreateGet(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	sess, err := store.Create(initiator.MachineID, initiator.PublicKey, Params{MaxPayloadBytes: 1024})
+	sess, err := store.Create(initiator.MachineID, initiator.PublicKey, Params{MaxPayloadBytes: 1024}, "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestSessionStoreExpiry(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	sess, err := store.Create(initiator.MachineID, initiator.PublicKey, Params{})
+	sess, err := store.Create(initiator.MachineID, initiator.PublicKey, Params{}, "")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -64,11 +64,11 @@ func TestSessionStoreCloseAndSweep(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	live, err := store.Create(initiator.MachineID, initiator.PublicKey, Params{})
+	live, err := store.Create(initiator.MachineID, initiator.PublicKey, Params{}, "")
 	if err != nil {
 		t.Fatalf("Create (live): %v", err)
 	}
-	expired, err := store.Create(initiator.MachineID, initiator.PublicKey, Params{})
+	expired, err := store.Create(initiator.MachineID, initiator.PublicKey, Params{}, "")
 	if err != nil {
 		t.Fatalf("Create (expired): %v", err)
 	}

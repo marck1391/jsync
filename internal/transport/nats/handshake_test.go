@@ -66,7 +66,7 @@ func TestServeAndRequestHandshakeOverNATS(t *testing.T) {
 	}
 	defer sub.Unsubscribe()
 
-	resp, err := RequestHandshake(initiatorConn, initiator, responder.MachineID, 2*time.Second)
+	resp, err := RequestHandshake(initiatorConn, initiator, responder.MachineID, "/home/user/workspace/incoming", 2*time.Second)
 	if err != nil {
 		t.Fatalf("RequestHandshake: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestRequestHandshakeRejectsUnauthorizedOverNATS(t *testing.T) {
 	}
 	defer sub.Unsubscribe()
 
-	resp, err := RequestHandshake(initiatorConn, initiator, responder.MachineID, 2*time.Second)
+	resp, err := RequestHandshake(initiatorConn, initiator, responder.MachineID, "", 2*time.Second)
 	if err != nil {
 		t.Fatalf("RequestHandshake: %v", err)
 	}

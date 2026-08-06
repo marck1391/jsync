@@ -20,23 +20,36 @@ type Request struct {
 	PublicKey       []byte    `json:"public_key"` // Ed25519, 32 bytes
 	Timestamp       time.Time `json:"timestamp"`
 	Nonce           [16]byte  `json:"nonce"`
-	Signature       []byte    `json:"signature"` // over SignedPayload()
+
+	// RequestedDestPath is where the initiator wants Fase 2 to write on
+	// the responder's filesystem. Deciding this at handshake time (Fase 1
+	// §3 step 3: "rutas permitidas de destino") lets the Responder reject
+	// an out-of-policy path before any bytes move, and lets Session carry
+	// the already-validated path forward to Fase 2 without re-parsing it
+	// out of stream metadata.
+	RequestedDestPath string `json:"requested_dest_path"`
+
+	Signature []byte `json:"signature"` // over SignedPayload()
 }
 
 // SignedPayload returns the exact bytes the requester signs and the
 // responder re-derives to verify. Beyond the Timestamp + Nonce called out
-// in Fase 1 §3 step 1, it also binds MachineID (length-prefixed, since it's
-// variable-length) and PublicKey into the signature: leaving MachineID out
-// would let a relay rewrite it in transit without invalidating the
-// signature, since it's the only field here not otherwise bound to the
-// verification key.
+// in Fase 1 §3 step 1, it also binds MachineID and RequestedDestPath
+// (length-prefixed, since both are variable-length) and PublicKey into the
+// signature: leaving any of those out would let a relay rewrite them in
+// transit without invalidating the signature, since they're the only
+// fields here not otherwise bound to the verification key. RequestedDestPath
+// in particular matters — an unsigned destination path is a relay's
+// invitation to redirect where an approved transfer writes on disk.
 func (r *Request) SignedPayload() []byte {
-	buf := make([]byte, 0, 4+8+len(r.Nonce)+4+len(r.MachineID)+len(r.PublicKey))
+	buf := make([]byte, 0, 4+8+len(r.Nonce)+4+len(r.MachineID)+4+len(r.RequestedDestPath)+len(r.PublicKey))
 	buf = binary.BigEndian.AppendUint32(buf, uint32(r.ProtocolVersion))
 	buf = binary.BigEndian.AppendUint64(buf, uint64(r.Timestamp.UnixNano()))
 	buf = append(buf, r.Nonce[:]...)
 	buf = binary.BigEndian.AppendUint32(buf, uint32(len(r.MachineID)))
 	buf = append(buf, r.MachineID...)
+	buf = binary.BigEndian.AppendUint32(buf, uint32(len(r.RequestedDestPath)))
+	buf = append(buf, r.RequestedDestPath...)
 	buf = append(buf, r.PublicKey...)
 	return buf
 }

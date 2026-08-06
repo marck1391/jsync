@@ -5,8 +5,10 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -14,9 +16,12 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 
 	"filesharer/internal/config"
+	"filesharer/internal/daemon"
 	"filesharer/internal/identity"
+	"filesharer/internal/pipeline"
 	fsnats "filesharer/internal/transport/nats"
 )
 
@@ -151,6 +156,7 @@ func cmdShare(args []string) error {
 	fs := flag.NewFlagSet("share", flag.ContinueOnError)
 	cfgPath := fs.String("config", "config.yaml", "path to daemon config file")
 	timeout := fs.Duration("timeout", 10*time.Second, "handshake timeout")
+	transferTimeout := fs.Duration("transfer-timeout", 2*time.Minute, "how long to wait for the transfer to finish after the handshake is approved")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -188,7 +194,7 @@ func cmdShare(args []string) error {
 	}
 	defer conn.Close()
 
-	resp, err := fsnats.RequestHandshake(conn, id, targetMachineID, *timeout)
+	resp, err := fsnats.RequestHandshake(conn, id, targetMachineID, destPath, *timeout)
 	if err != nil {
 		return fmt.Errorf("handshake with %s: %w", targetMachineID, err)
 	}
@@ -199,9 +205,47 @@ func cmdShare(args []string) error {
 		return fmt.Errorf("handshake approved but %s's prekey bundle failed to verify — refusing to continue", targetMachineID)
 	}
 
-	fmt.Println("handshake approved")
-	fmt.Println("  session_id:", resp.SessionID)
-	fmt.Println("  allowed_dest_path:", resp.Params.AllowedDestPath)
-	fmt.Printf("streaming %s -> %s:%s is not implemented yet (needs Fase 2) — the secure session is established but no bytes move\n", srcPath, targetMachineID, destPath)
-	return nil
+	fmt.Println("handshake approved, session_id:", resp.SessionID)
+
+	js, err := jetstream.New(conn)
+	if err != nil {
+		return fmt.Errorf("init jetstream: %w", err)
+	}
+
+	// Subscribe to the completion status before publishing a single byte —
+	// the daemon could in principle finish before we'd get around to
+	// subscribing afterward, and NATS core pub/sub drops messages nobody
+	// was listening for yet.
+	statusCh := make(chan daemon.Status, 1)
+	statusSub, err := conn.Subscribe(fsnats.StatusSubject(resp.SessionID), func(msg *natsgo.Msg) {
+		var st daemon.Status
+		if err := json.Unmarshal(msg.Data, &st); err == nil {
+			statusCh <- st
+		}
+	})
+	if err != nil {
+		return fmt.Errorf("subscribe to transfer status: %w", err)
+	}
+	defer statusSub.Unsubscribe()
+
+	ar := pipeline.NewArchiveReader(srcPath)
+	defer ar.Close()
+
+	pubCtx, cancel := context.WithTimeout(context.Background(), *transferTimeout)
+	defer cancel()
+	if err := pipeline.PublishArchive(pubCtx, js, fsnats.StreamSubject(resp.SessionID), ar, pipeline.DefaultChunkSize); err != nil {
+		return fmt.Errorf("send %s: %w", srcPath, err)
+	}
+	fmt.Println("all chunks sent, waiting for", targetMachineID, "to finish writing")
+
+	select {
+	case st := <-statusCh:
+		if !st.Completed {
+			return fmt.Errorf("%s failed to write %s: %s", targetMachineID, destPath, st.Error)
+		}
+		fmt.Printf("done: %s -> %s:%s\n", srcPath, targetMachineID, destPath)
+		return nil
+	case <-time.After(*transferTimeout):
+		return fmt.Errorf("timed out after %s waiting for %s to confirm the write", *transferTimeout, targetMachineID)
+	}
 }

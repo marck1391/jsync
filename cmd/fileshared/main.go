@@ -13,8 +13,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nats-io/nats.go/jetstream"
+
 	"filesharer/internal/config"
 	"filesharer/internal/crypto/x3dh"
+	"filesharer/internal/daemon"
 	"filesharer/internal/handshake"
 	"filesharer/internal/identity"
 	fsnats "filesharer/internal/transport/nats"
@@ -87,6 +90,15 @@ func run() error {
 		return fmt.Errorf("bootstrap nats (%s): %w", cfg.Role, err)
 	}
 
+	js, err := jetstream.New(node.Conn)
+	if err != nil {
+		node.Close()
+		return fmt.Errorf("init jetstream: %w", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	responder := &handshake.Responder{
 		Authorized: authorized,
 		Sessions:   handshake.NewSessionStore(),
@@ -96,6 +108,25 @@ func run() error {
 			MaxPayloadBytes: cfg.MaxPayloadBytes,
 			AllowedDestPath: cfg.AllowedDestPath,
 		},
+	}
+	// Handle runs synchronously inside the NATS subscription callback, so
+	// OnApproved must not block it on the actual (potentially slow) byte
+	// transfer — hence the goroutine for daemon.ReceiveSession. Creating
+	// the stream itself stays synchronous and runs before Handle's
+	// Response goes out, though: the initiator only learns the session was
+	// approved once this returns, and if it started publishing chunks
+	// before the stream existed, JetStream would have nothing to accept
+	// them into.
+	responder.OnApproved = func(sess *handshake.Session) {
+		if _, err := fsnats.EnsureStream(ctx, js, sess.ID); err != nil {
+			fmt.Fprintf(os.Stderr, "fileshared: ensure stream for session %s: %v\n", sess.ID, err)
+			return
+		}
+		go func() {
+			if err := daemon.ReceiveSession(ctx, node.Conn, js, sess); err != nil {
+				fmt.Fprintf(os.Stderr, "fileshared: receive session %s: %v\n", sess.ID, err)
+			}
+		}()
 	}
 
 	sub, err := fsnats.ServeHandshake(node.Conn, id.MachineID, responder)
@@ -111,9 +142,6 @@ func run() error {
 	if cfg.Role == config.RoleHub {
 		fmt.Println("  leaf_node_url:", node.LeafNodeURL())
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	saveTicker := time.NewTicker(prekeySaveInterval)
 	defer saveTicker.Stop()

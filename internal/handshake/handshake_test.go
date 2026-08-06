@@ -52,7 +52,7 @@ func TestHandshakeHappyPath(t *testing.T) {
 	}
 	responder, responderID := newTestResponder(t, initiator)
 
-	req, err := BuildRequest(initiator)
+	req, err := BuildRequest(initiator, "/home/user/workspace/incoming")
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}
@@ -78,6 +78,27 @@ func TestHandshakeHappyPath(t *testing.T) {
 	if sess.PeerMachineID != initiator.MachineID {
 		t.Errorf("PeerMachineID = %q, want %q", sess.PeerMachineID, initiator.MachineID)
 	}
+	if sess.DestPath != "/home/user/workspace/incoming" {
+		t.Errorf("DestPath = %q, want %q", sess.DestPath, "/home/user/workspace/incoming")
+	}
+}
+
+func TestHandshakeRejectsDestPathOutsideAllowedRoot(t *testing.T) {
+	initiator, err := identity.Generate("initiator-machine")
+	if err != nil {
+		t.Fatalf("Generate initiator: %v", err)
+	}
+	responder, _ := newTestResponder(t, initiator)
+
+	req, err := BuildRequest(initiator, "/home/user/workspace-evil/payload")
+	if err != nil {
+		t.Fatalf("BuildRequest: %v", err)
+	}
+
+	resp := responder.Handle(req)
+	if resp.Approved {
+		t.Fatal("Handle: expected rejection for a dest path outside the allowed root")
+	}
 }
 
 func TestHandshakeRejectsUnauthorizedClient(t *testing.T) {
@@ -88,7 +109,7 @@ func TestHandshakeRejectsUnauthorizedClient(t *testing.T) {
 	// No trust: pass nil so the initiator's key is never added.
 	responder, _ := newTestResponder(t, nil)
 
-	req, err := BuildRequest(initiator)
+	req, err := BuildRequest(initiator, "")
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}
@@ -109,7 +130,7 @@ func TestHandshakeRejectsReplay(t *testing.T) {
 	}
 	responder, _ := newTestResponder(t, initiator)
 
-	req, err := BuildRequest(initiator)
+	req, err := BuildRequest(initiator, "/home/user/workspace/incoming")
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}
@@ -161,7 +182,7 @@ func TestHandshakeRejectsTamperedSignature(t *testing.T) {
 	}
 	responder, _ := newTestResponder(t, initiator)
 
-	req, err := BuildRequest(initiator)
+	req, err := BuildRequest(initiator, "")
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}
@@ -180,7 +201,7 @@ func TestHandshakeRejectsProtocolVersionMismatch(t *testing.T) {
 	}
 	responder, _ := newTestResponder(t, initiator)
 
-	req, err := BuildRequest(initiator)
+	req, err := BuildRequest(initiator, "")
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}

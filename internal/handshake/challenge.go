@@ -24,19 +24,23 @@ var (
 	ErrNotAuthorized   = errors.New("handshake: public key not in authorized_clients")
 )
 
-// BuildRequest signs a new challenge as id (Fase 1 §3 step 1).
-func BuildRequest(id *identity.Identity) (*Request, error) {
+// BuildRequest signs a new challenge as id, requesting destPath as the
+// Fase 2 write target (Fase 1 §3 step 1). Pass an empty destPath for a
+// handshake that isn't about to stream anything to disk (none exist yet,
+// but nothing here requires it to be non-empty).
+func BuildRequest(id *identity.Identity, destPath string) (*Request, error) {
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, fmt.Errorf("handshake: generate nonce: %w", err)
 	}
 
 	req := &Request{
-		ProtocolVersion: ProtocolVersion,
-		MachineID:       id.MachineID,
-		PublicKey:       []byte(id.PublicKey),
-		Timestamp:       time.Now().UTC(),
-		Nonce:           nonce,
+		ProtocolVersion:   ProtocolVersion,
+		MachineID:         id.MachineID,
+		PublicKey:         []byte(id.PublicKey),
+		Timestamp:         time.Now().UTC(),
+		Nonce:             nonce,
+		RequestedDestPath: destPath,
 	}
 	req.Signature = id.Sign(req.SignedPayload())
 	return req, nil
