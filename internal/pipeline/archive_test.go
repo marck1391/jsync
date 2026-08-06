@@ -203,6 +203,56 @@ func TestEstimateSendSizeSingleFile(t *testing.T) {
 	}
 }
 
+// TestNewArchiveReaderEmitsRealSymlinkEntry confirms addSymlinkToTar wrote
+// what it's supposed to: a tar.TypeSymlink entry (not skipped, not a
+// TypeReg entry with the link's own bytes) carrying the correct Linkname,
+// no content. Skipped if this environment can't create symlinks.
+func TestNewArchiveReaderEmitsRealSymlinkEntry(t *testing.T) {
+	requireSymlinkSupport(t)
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "target.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.Symlink("target.txt", filepath.Join(root, "link.txt")); err != nil {
+		t.Fatalf("setup symlink: %v", err)
+	}
+
+	ar := NewArchiveReader(root, nil)
+	defer ar.Close()
+
+	gz, err := gzip.NewReader(ar)
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	tr := tar.NewReader(gz)
+
+	var found *tar.Header
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("tar Next: %v", err)
+		}
+		if hdr.Name == "link.txt" {
+			h := *hdr
+			found = &h
+		}
+	}
+
+	if found == nil {
+		t.Fatal("link.txt entry not found in archive")
+	}
+	if found.Typeflag != tar.TypeSymlink {
+		t.Errorf("link.txt Typeflag = %v, want TypeSymlink", found.Typeflag)
+	}
+	if found.Linkname != "target.txt" {
+		t.Errorf("link.txt Linkname = %q, want %q", found.Linkname, "target.txt")
+	}
+}
+
 func TestNewArchiveReaderSingleFile(t *testing.T) {
 	root := t.TempDir()
 	filePath := filepath.Join(root, "single.txt")

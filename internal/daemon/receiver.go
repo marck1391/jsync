@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -130,6 +131,9 @@ func ReceiveSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStre
 		bytesReceived.Add(size)
 		publishProgress()
 	}
+	onSkippedSymlink := func(relPath string, cause error) {
+		fmt.Fprintf(os.Stderr, "fileshared: session %s: skipped symlink %s (unsupported on this platform): %v\n", sess.ID, relPath, cause)
+	}
 
 	pr, recvDone := pipeline.ReceiveArchive(ctx, consumer, associatedData, deriveChain, onTotalBytes)
 	// If ExtractArchive below returns early on error without draining pr
@@ -140,7 +144,7 @@ func ReceiveSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStre
 	// value and that goroutine always exits.
 	defer pr.Close()
 
-	extractErr := pipeline.ExtractArchive(pr, sandboxDir, onFileComplete)
+	extractErr := pipeline.ExtractArchive(pr, sandboxDir, onFileComplete, onSkippedSymlink)
 	recvErr := <-recvDone
 
 	if extractErr != nil || recvErr != nil {

@@ -35,7 +35,16 @@ func SandboxPath(destDir, sessionID string) string {
 // partially-received sandbox are safe to keep rather than re-request; the
 // size is what Fase 2's progress reporting accumulates against
 // EstimateSendSize's upfront estimate.
-func ExtractArchive(r io.Reader, sandboxDir string, onFileComplete func(relPath, contentHash string, size int64)) error {
+//
+// onSkippedSymlink, if non-nil, is called instead of aborting when a
+// symlink entry can't be created because isSymlinkUnsupported classifies
+// the failure as a platform limitation (most commonly: Windows without
+// Developer Mode) rather than a real problem — extraction continues with
+// the rest of the tree. This is the one entry-level failure this function
+// doesn't treat as fatal; everything else (a corrupt stream, a tar entry
+// or symlink target that escapes sandboxDir, an unclassified symlink
+// error) still aborts the whole session, same as always.
+func ExtractArchive(r io.Reader, sandboxDir string, onFileComplete func(relPath, contentHash string, size int64), onSkippedSymlink func(relPath string, cause error)) error {
 	if err := os.MkdirAll(sandboxDir, 0o700); err != nil {
 		return fmt.Errorf("pipeline: create sandbox %s: %w", sandboxDir, err)
 	}
@@ -77,9 +86,31 @@ func ExtractArchive(r io.Reader, sandboxDir string, onFileComplete func(relPath,
 			if onFileComplete != nil {
 				onFileComplete(hdr.Name, hash, size)
 			}
+		case tar.TypeSymlink:
+			// Validates the *target*, not just the entry's own name —
+			// safeJoin above already confined where the symlink file
+			// itself lives, but says nothing about where it points once
+			// followed. This check always aborts on failure, unlike the
+			// platform-support check below: an escaping target is a
+			// hostile-or-buggy-sender problem, not an environmental one.
+			if err := safeSymlinkTarget(sandboxDir, target, hdr.Linkname); err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+				return fmt.Errorf("pipeline: mkdir %s: %w", filepath.Dir(target), err)
+			}
+			if err := writeSymlink(target, filepath.FromSlash(hdr.Linkname)); err != nil {
+				if isSymlinkUnsupported(err) {
+					if onSkippedSymlink != nil {
+						onSkippedSymlink(hdr.Name, err)
+					}
+					continue
+				}
+				return err
+			}
 		default:
-			// Anything else (symlinks, devices, ...) is skipped — matches
-			// archive.go not emitting those entry types yet either.
+			// Anything else (devices, ...) is skipped — matches archive.go
+			// not emitting those entry types.
 		}
 	}
 }
@@ -114,6 +145,65 @@ func safeJoin(base, name string) (string, error) {
 		return "", fmt.Errorf("pipeline: tar entry %q escapes sandbox", name)
 	}
 	return target, nil
+}
+
+// safeSymlinkTarget reports whether linkname — a tar entry's raw symlink
+// target, exactly as archive.go's addSymlinkToTar wrote it — would still
+// resolve inside sandboxDir once actually followed from entryTarget's
+// location. safeJoin alone doesn't cover this: it confines where the
+// symlink *file* lives, not where it *points*, so without this check a
+// perfectly sandbox-confined entry name could still create a symlink
+// pointing anywhere on disk (e.g. an absolute "/etc/passwd", or enough
+// ".." to walk out). An absolute target is rejected outright — a tree
+// meant to be transferred portably between machines has no legitimate
+// reason to need one.
+func safeSymlinkTarget(sandboxDir, entryTarget, linkname string) error {
+	if looksAbsolute(linkname) {
+		return fmt.Errorf("pipeline: symlink %q has an absolute target %q, refusing", entryTarget, linkname)
+	}
+	resolved := filepath.Join(filepath.Dir(entryTarget), filepath.FromSlash(linkname))
+	rel, err := filepath.Rel(sandboxDir, resolved)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("pipeline: symlink %q target %q escapes sandbox", entryTarget, linkname)
+	}
+	return nil
+}
+
+// looksAbsolute reports whether linkname looks like an absolute path on
+// *any* platform, not just whichever one this binary happens to be
+// running on. filepath.IsAbs alone isn't enough here: it only recognizes
+// the current platform's convention, but Linkname came from whatever
+// platform the sender archived on — "/etc/passwd" (POSIX-absolute) must
+// be rejected even when this receiver is Windows, where
+// filepath.IsAbs("/etc/passwd") is false (Windows absolute paths need a
+// drive letter), and a Windows-style "C:\..." target must be rejected
+// even on a POSIX receiver.
+func looksAbsolute(linkname string) bool {
+	if strings.HasPrefix(linkname, "/") || strings.HasPrefix(linkname, "\\") {
+		return true
+	}
+	if len(linkname) >= 2 && linkname[1] == ':' {
+		c := linkname[0]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			return true // Windows drive-letter path, e.g. "C:\..." or "C:/..."
+		}
+	}
+	return filepath.IsAbs(linkname)
+}
+
+// writeSymlink creates a symlink at target pointing to linkname, removing
+// whatever (if anything) already sits at target first — sandboxDir can be
+// a reused, resumed sandbox (Fase 2 "recuperación de red") where a prior
+// attempt's entry might already be there; os.Symlink itself has no
+// truncate-and-replace equivalent the way O_TRUNC gives writeRegularFile.
+func writeSymlink(target, linkname string) error {
+	if err := os.Remove(target); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("pipeline: remove existing %s before symlinking: %w", target, err)
+	}
+	if err := os.Symlink(linkname, target); err != nil {
+		return fmt.Errorf("pipeline: symlink %s -> %s: %w", target, linkname, err)
+	}
+	return nil
 }
 
 // CommitSandbox atomically replaces destDir with sandboxDir's contents

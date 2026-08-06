@@ -69,7 +69,7 @@ func TestSendReceiveCommitRoundTrip(t *testing.T) {
 	destDir := filepath.Join(dir, "final", "dest")
 	sandboxDir := pipeline.SandboxPath(destDir, sessionID)
 
-	if err := pipeline.ExtractArchive(pr, sandboxDir, nil); err != nil {
+	if err := pipeline.ExtractArchive(pr, sandboxDir, nil, nil); err != nil {
 		_ = pipeline.AbortSandbox(sandboxDir)
 		t.Fatalf("ExtractArchive: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestSendReceiveCommitRoundTripEncrypted(t *testing.T) {
 	destDir := filepath.Join(dir, "final", "dest")
 	sandboxDir := pipeline.SandboxPath(destDir, sessionID)
 
-	if err := pipeline.ExtractArchive(pr, sandboxDir, nil); err != nil {
+	if err := pipeline.ExtractArchive(pr, sandboxDir, nil, nil); err != nil {
 		_ = pipeline.AbortSandbox(sandboxDir)
 		t.Fatalf("ExtractArchive: %v", err)
 	}

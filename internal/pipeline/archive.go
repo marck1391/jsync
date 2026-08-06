@@ -91,9 +91,11 @@ func walkAndAdd(tw *tar.Writer, root string, baseInfo fs.FileInfo, skip map[stri
 
 func addFileToTar(tw *tar.Writer, absPath, relPath string, info fs.FileInfo, skip map[string]string) error {
 	if info.Mode()&os.ModeSymlink != 0 {
-		// Skipped for now — real symlink handling (tar.TypeSymlink +
-		// Linkname) is a small, deliberately deferred addition.
-		return nil
+		// Symlinks never participate in resume/skip matching (below) —
+		// there's no meaningful "content hash" for one, and the wire cost
+		// of just re-sending the target string every attempt is a handful
+		// of bytes, not worth the bookkeeping.
+		return addSymlinkToTar(tw, absPath, relPath, info)
 	}
 
 	if !info.IsDir() && len(skip) > 0 {
@@ -132,6 +134,33 @@ func addFileToTar(tw *tar.Writer, absPath, relPath string, info fs.FileInfo, ski
 
 	if _, err := io.Copy(tw, f); err != nil {
 		return fmt.Errorf("pipeline: copy %s into archive: %w", absPath, err)
+	}
+	return nil
+}
+
+// addSymlinkToTar writes a tar.TypeSymlink entry for the symlink at
+// absPath — no content to copy, just the header, with Linkname set to
+// whatever the link currently points to (relative or absolute, dangling or
+// not; os.Readlink doesn't care and neither does this). tar.FileInfoHeader
+// sets Typeflag and Linkname on its own once given a non-empty link
+// argument alongside symlink fs.FileInfo. The target is normalized to
+// forward slashes for the same portability reason relPath already is
+// (walkAndAdd) — extract.go converts back via filepath.FromSlash before
+// ever handing it to os.Symlink.
+func addSymlinkToTar(tw *tar.Writer, absPath, relPath string, info fs.FileInfo) error {
+	target, err := os.Readlink(absPath)
+	if err != nil {
+		return fmt.Errorf("pipeline: readlink %s: %w", absPath, err)
+	}
+
+	hdr, err := tar.FileInfoHeader(info, filepath.ToSlash(target))
+	if err != nil {
+		return fmt.Errorf("pipeline: tar header for symlink %s: %w", relPath, err)
+	}
+	hdr.Name = relPath
+
+	if err := tw.WriteHeader(hdr); err != nil {
+		return fmt.Errorf("pipeline: write tar header for symlink %s: %w", relPath, err)
 	}
 	return nil
 }
