@@ -15,12 +15,12 @@ const ProtocolVersion = 1
 // Request is the challenge sent by the initiating node to
 // fileshare.control.<target_machine_id>.handshake (Fase 1 §3 step 1).
 type Request struct {
-	ProtocolVersion int
-	MachineID       string
-	PublicKey       []byte // Ed25519, 32 bytes
-	Timestamp       time.Time
-	Nonce           [16]byte
-	Signature       []byte // over SignedPayload()
+	ProtocolVersion int       `json:"protocol_version"`
+	MachineID       string    `json:"machine_id"`
+	PublicKey       []byte    `json:"public_key"` // Ed25519, 32 bytes
+	Timestamp       time.Time `json:"timestamp"`
+	Nonce           [16]byte  `json:"nonce"`
+	Signature       []byte    `json:"signature"` // over SignedPayload()
 }
 
 // SignedPayload returns the exact bytes the requester signs and the
@@ -54,19 +54,19 @@ const (
 // Params are the agreed-upon session parameters the responder hands back
 // (Fase 1 §3 step 3): constraints the initiator must respect.
 type Params struct {
-	MaxPayloadBytes int64
-	AllowedDestPath string
-	Direction       Direction
+	MaxPayloadBytes int64     `json:"max_payload_bytes"`
+	AllowedDestPath string    `json:"allowed_dest_path"`
+	Direction       Direction `json:"direction"`
 }
 
 // Response is what the responding node sends back, approved or not (Fase 1
 // §3 step 4).
 type Response struct {
-	Approved  bool
-	Reason    string // set when Approved is false
-	SessionID string
-	Params    Params
-	Bundle    x3dh.Bundle
+	Approved  bool        `json:"approved"`
+	Reason    string      `json:"reason,omitempty"` // set when Approved is false
+	SessionID string      `json:"session_id,omitempty"`
+	Params    Params      `json:"params"`
+	Bundle    x3dh.Bundle `json:"bundle"`
 }
 
 // VerifyBundle checks that Bundle's Signed PreKey was actually signed by
