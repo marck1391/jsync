@@ -124,7 +124,7 @@ func run() error {
 	responder.OnApproved = func(sess *handshake.Session) {
 		if sess.Params.Direction == handshake.DirectionBidirectional {
 			go func() {
-				if err := daemon.WatchSession(ctx, node.Conn, js, sess, id.MachineID); err != nil {
+				if err := daemon.WatchSession(ctx, node.Conn, js, sess, id.MachineID, prekeys, id.PublicKey); err != nil {
 					fmt.Fprintf(os.Stderr, "fileshared: watch session %s: %v\n", sess.ID, err)
 				}
 			}()

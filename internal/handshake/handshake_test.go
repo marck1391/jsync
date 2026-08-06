@@ -52,7 +52,7 @@ func TestHandshakeHappyPath(t *testing.T) {
 	}
 	responder, responderID := newTestResponder(t, initiator)
 
-	req, err := BuildRequest(initiator, "/home/user/workspace/incoming", DirectionUnidirectional)
+	req, err := BuildRequest(initiator, "/home/user/workspace/incoming", DirectionUnidirectional, false)
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestHandshakeHonorsRequestedDirection(t *testing.T) {
 	}
 	responder, _ := newTestResponder(t, initiator)
 
-	req, err := BuildRequest(initiator, "/home/user/workspace/watched", DirectionBidirectional)
+	req, err := BuildRequest(initiator, "/home/user/workspace/watched", DirectionBidirectional, false)
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestHandshakeRejectsDestPathOutsideAllowedRoot(t *testing.T) {
 	}
 	responder, _ := newTestResponder(t, initiator)
 
-	req, err := BuildRequest(initiator, "/home/user/workspace-evil/payload", DirectionUnidirectional)
+	req, err := BuildRequest(initiator, "/home/user/workspace-evil/payload", DirectionUnidirectional, false)
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestHandshakeRejectsUnauthorizedClient(t *testing.T) {
 	// No trust: pass nil so the initiator's key is never added.
 	responder, _ := newTestResponder(t, nil)
 
-	req, err := BuildRequest(initiator, "", DirectionUnidirectional)
+	req, err := BuildRequest(initiator, "", DirectionUnidirectional, false)
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestHandshakeRejectsReplay(t *testing.T) {
 	}
 	responder, _ := newTestResponder(t, initiator)
 
-	req, err := BuildRequest(initiator, "/home/user/workspace/incoming", DirectionUnidirectional)
+	req, err := BuildRequest(initiator, "/home/user/workspace/incoming", DirectionUnidirectional, false)
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}
@@ -214,7 +214,7 @@ func TestHandshakeRejectsTamperedSignature(t *testing.T) {
 	}
 	responder, _ := newTestResponder(t, initiator)
 
-	req, err := BuildRequest(initiator, "", DirectionUnidirectional)
+	req, err := BuildRequest(initiator, "", DirectionUnidirectional, false)
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestHandshakeRejectsProtocolVersionMismatch(t *testing.T) {
 	}
 	responder, _ := newTestResponder(t, initiator)
 
-	req, err := BuildRequest(initiator, "", DirectionUnidirectional)
+	req, err := BuildRequest(initiator, "", DirectionUnidirectional, false)
 	if err != nil {
 		t.Fatalf("BuildRequest: %v", err)
 	}

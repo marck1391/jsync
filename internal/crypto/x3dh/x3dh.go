@@ -119,6 +119,37 @@ func (s *Store) DeriveResponderChain(initiatorIdentityDHPub, ephemeralPub *ecdh.
 	return ratchet.InitReceiving(sk, signedPriv, ephemeralPub)
 }
 
+// DeriveResponderChains is DeriveResponderChain's Fase 5 counterpart: a
+// live Watcher session is bidirectional, so the responder needs a second,
+// independent chain for its own outgoing events — not just the one that
+// mirrors the initiator's sending chain. That second chain has to be
+// seeded by a fresh DH step (a new ephemeral keypair the caller generates
+// against ephemeralPub — see ratchet.InitSending), not derived from the
+// same dhOut this method already consumes, or the two chains would share
+// key material. This method only hands back sk (alongside the mirrored
+// receiving chain DeriveResponderChain already provides) so the caller can
+// do that second ratchet.InitSending itself; it does not generate the
+// fresh keypair or the second chain here, to keep this package's surface
+// symmetric with DeriveResponderChain rather than assuming Fase 5's
+// specific two-chain shape.
+//
+// Calls deriveResponder exactly once — like DeriveResponderChain, never
+// call both for the same (initiatorIdentityDHPub, ephemeralPub, usedOTPID):
+// deriveResponder permanently consumes the One-Time PreKey identified by
+// usedOTPID (see Store's pending field), so a second call for the same
+// handshake fails with "one-time prekey ... not found".
+func (s *Store) DeriveResponderChains(initiatorIdentityDHPub, ephemeralPub *ecdh.PublicKey, usedOTPID uint32) (sk []byte, inbound *ratchet.Chain, err error) {
+	sk, signedPriv, err := s.deriveResponder(initiatorIdentityDHPub, ephemeralPub, usedOTPID)
+	if err != nil {
+		return nil, nil, err
+	}
+	inbound, err = ratchet.InitReceiving(sk, signedPriv, ephemeralPub)
+	if err != nil {
+		return nil, nil, err
+	}
+	return sk, inbound, nil
+}
+
 func (s *Store) deriveResponder(initiatorIdentityDHPub, ephemeralPub *ecdh.PublicKey, usedOTPID uint32) (sk []byte, signedPriv *ecdh.PrivateKey, err error) {
 	s.mu.Lock()
 	signedPriv = s.signed.KeyPair

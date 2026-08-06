@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"crypto/ecdh"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -21,6 +22,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"filesharer/internal/config"
+	"filesharer/internal/crypto/ratchet"
 	"filesharer/internal/crypto/x3dh"
 	"filesharer/internal/daemon"
 	"filesharer/internal/handshake"
@@ -187,6 +189,60 @@ func buildEncryption(cfg *config.Config, id *identity.Identity, bundle x3dh.Bund
 	}, nil
 }
 
+// buildWatchEncryption is buildEncryption's Fase 5 counterpart: a live
+// watch session is bidirectional, so it needs two independent chains, not
+// buildEncryption's one (see internal/syncfs/encrypt.go's Encryption doc
+// comment for why sharing one chain both directions would be an AES-GCM
+// nonce-reuse bug). It runs the initiator ("Alice") half of the bootstrap
+// dance: derive X3DH as usual, build the outbound chain from that exactly
+// like buildEncryption does, publish OpBootstrap so the responder can
+// mirror it, then block for the responder's OpBootstrapAck — its own fresh
+// ratchet key — and use that (against the same ephemeralPriv X3DH already
+// generated) to derive the inbound chain. cons must already be this node's
+// events consumer (from fsnats.EnsureEventsConsumer) so ReceiveBootstrapAck
+// can read the responder's reply off it.
+func buildWatchEncryption(ctx context.Context, cfg *config.Config, id *identity.Identity, bundle x3dh.Bundle, js jetstream.JetStream, cons jetstream.Consumer, subject, peerMachineID string) (*syncfs.Encryption, error) {
+	store, err := x3dh.LoadStore(cfg.PrekeysPath, id.PublicKey, id.PrivateKey, cfg.OneTimePreKeyCount)
+	if err != nil {
+		return nil, fmt.Errorf("load prekeys: %w", err)
+	}
+
+	sk, ephemeralPriv, usedOTPID, err := store.DeriveInitiator(bundle)
+	if err != nil {
+		return nil, fmt.Errorf("X3DH: %w", err)
+	}
+	outbound, err := ratchet.InitSending(sk, ephemeralPriv, bundle.SignedPreKey)
+	if err != nil {
+		return nil, fmt.Errorf("init outbound chain: %w", err)
+	}
+
+	bootCtx, cancel := context.WithTimeout(ctx, watchBootstrapTimeout)
+	defer cancel()
+
+	if err := syncfs.PublishBootstrap(bootCtx, js, subject, id.MachineID, store.IdentityDHPublicKey().Bytes(), ephemeralPriv.PublicKey().Bytes(), usedOTPID); err != nil {
+		return nil, fmt.Errorf("publish bootstrap: %w", err)
+	}
+
+	responderEphemeralPubBytes, err := syncfs.ReceiveBootstrapAck(bootCtx, cons, peerMachineID)
+	if err != nil {
+		return nil, fmt.Errorf("receive bootstrap ack: %w", err)
+	}
+	responderEphemeralPub, err := ecdh.X25519().NewPublicKey(responderEphemeralPubBytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse responder ephemeral key: %w", err)
+	}
+	inbound, err := ratchet.InitReceiving(sk, ephemeralPriv, responderEphemeralPub)
+	if err != nil {
+		return nil, fmt.Errorf("init inbound chain: %w", err)
+	}
+
+	return &syncfs.Encryption{
+		SendChain:      outbound,
+		RecvChain:      inbound,
+		AssociatedData: x3dh.AssociatedData(id.PublicKey, bundle.IdentityKey),
+	}, nil
+}
+
 func cmdShare(args []string) error {
 	fs := flag.NewFlagSet("share", flag.ContinueOnError)
 	cfgPath := fs.String("config", "config.yaml", "path to daemon config file")
@@ -230,7 +286,7 @@ func cmdShare(args []string) error {
 	}
 	defer conn.Close()
 
-	resp, err := fsnats.RequestHandshake(conn, id, targetMachineID, destPath, handshake.DirectionUnidirectional, *timeout)
+	resp, err := fsnats.RequestHandshake(conn, id, targetMachineID, destPath, handshake.DirectionUnidirectional, false, *timeout)
 	if err != nil {
 		return fmt.Errorf("handshake with %s: %w", targetMachineID, err)
 	}
@@ -295,17 +351,25 @@ func cmdShare(args []string) error {
 	}
 }
 
+// watchBootstrapTimeout bounds how long the initiator waits for the
+// responder's OpBootstrapAck (encrypt.go) during an encrypted watch
+// session's setup — see internal/daemon's bootstrapTimeout for the same
+// bound on the other side of this exchange.
+const watchBootstrapTimeout = 15 * time.Second
+
 // cmdWatch runs a live, bidirectional Fase 5 sync session: it handshakes
 // with DirectionBidirectional (fileshared's OnApproved starts a matching
 // Watcher on its own side, see cmd/fileshared), then watches localPath and
 // both publishes its own changes and applies the peer's, until interrupted
-// (Ctrl+C / SIGTERM). Unlike cmdShare there is no Fase 3 encryption yet —
-// internal/syncfs's Event has no cipher fields — and no initial
-// reconciliation: it only reacts to changes from the moment it starts.
+// (Ctrl+C / SIGTERM). With --encrypt, every event is end-to-end encrypted
+// via Fase 3's X3DH + Double Ratchet before any of that starts — see
+// buildWatchEncryption. There is still no initial reconciliation: it only
+// reacts to changes from the moment it starts.
 func cmdWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	cfgPath := fs.String("config", "config.yaml", "path to daemon config file")
 	timeout := fs.Duration("timeout", 10*time.Second, "handshake timeout")
+	encrypt := fs.Bool("encrypt", false, "end-to-end encrypt the session (Fase 3: X3DH + Double Ratchet, event contents unreadable to the NATS broker)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -339,7 +403,7 @@ func cmdWatch(args []string) error {
 	}
 	defer conn.Close()
 
-	resp, err := fsnats.RequestHandshake(conn, id, targetMachineID, destPath, handshake.DirectionBidirectional, *timeout)
+	resp, err := fsnats.RequestHandshake(conn, id, targetMachineID, destPath, handshake.DirectionBidirectional, *encrypt, *timeout)
 	if err != nil {
 		return fmt.Errorf("handshake with %s: %w", targetMachineID, err)
 	}
@@ -362,9 +426,23 @@ func cmdWatch(args []string) error {
 	if err != nil {
 		return fmt.Errorf("ensure events consumer: %w", err)
 	}
+	subject := fsnats.EventsSubject(resp.SessionID)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Encryption, if requested, must be fully established — both chains
+	// derived — before this node's own Watcher starts, or a real Event
+	// could reach PublishChanges/ReceiveChanges before there's a chain to
+	// encrypt/decrypt it with. See internal/syncfs/encrypt.go.
+	var enc *syncfs.Encryption
+	if *encrypt {
+		enc, err = buildWatchEncryption(ctx, cfg, id, resp.Bundle, js, cons, subject, targetMachineID)
+		if err != nil {
+			return fmt.Errorf("set up encryption: %w", err)
+		}
+		fmt.Println("encryption: on (X3DH + Double Ratchet)")
+	}
 
 	matcher, err := ignore.Load(localPath)
 	if err != nil {
@@ -381,7 +459,6 @@ func cmdWatch(args []string) error {
 
 	echo := syncfs.NewEchoGuard()
 	versions := syncfs.NewVersionStore()
-	subject := fsnats.EventsSubject(resp.SessionID)
 
 	onConflict := func(ev syncfs.Event, conflictPath string) {
 		fmt.Fprintf(os.Stderr, "fileshare watch: conflict on %s, wrote %s — resolve manually\n", ev.RelPath, conflictPath)
@@ -389,10 +466,10 @@ func cmdWatch(args []string) error {
 
 	errCh := make(chan error, 2)
 	go func() {
-		errCh <- syncfs.PublishChanges(ctx, js, subject, id.MachineID, localPath, changes, echo, versions)
+		errCh <- syncfs.PublishChanges(ctx, js, subject, id.MachineID, localPath, changes, echo, versions, enc)
 	}()
 	go func() {
-		errCh <- syncfs.ReceiveChanges(ctx, cons, id.MachineID, localPath, echo, versions, onConflict)
+		errCh <- syncfs.ReceiveChanges(ctx, cons, id.MachineID, localPath, echo, versions, onConflict, enc)
 	}()
 
 	fmt.Printf("watching %s <-> %s:%s (Ctrl+C to stop)\n", localPath, targetMachineID, destPath)

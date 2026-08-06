@@ -60,6 +60,7 @@ func (r *Responder) Handle(req *Request) *Response {
 
 	params := r.DefaultParams
 	params.Direction = req.RequestedDirection
+	params.Encrypt = req.RequestedEncrypt
 
 	sess, err := r.Sessions.Create(req.MachineID, ed25519.PublicKey(req.PublicKey), params, req.RequestedDestPath)
 	if err != nil {

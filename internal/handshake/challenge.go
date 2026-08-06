@@ -29,7 +29,7 @@ var (
 // standing Fase 5 Watcher (Fase 1 §3 step 1). Pass an empty destPath for a
 // handshake that isn't about to write anything to disk (none exist yet,
 // but nothing here requires it to be non-empty).
-func BuildRequest(id *identity.Identity, destPath string, direction Direction) (*Request, error) {
+func BuildRequest(id *identity.Identity, destPath string, direction Direction, encrypt bool) (*Request, error) {
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return nil, fmt.Errorf("handshake: generate nonce: %w", err)
@@ -43,6 +43,7 @@ func BuildRequest(id *identity.Identity, destPath string, direction Direction) (
 		Nonce:              nonce,
 		RequestedDestPath:  destPath,
 		RequestedDirection: direction,
+		RequestedEncrypt:   encrypt,
 	}
 	req.Signature = id.Sign(req.SignedPayload())
 	return req, nil

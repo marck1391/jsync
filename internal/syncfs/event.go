@@ -18,6 +18,16 @@ const (
 	OpWrite  Op = "write" // covers both CREATE and WRITE — the receiving side treats them identically (see Apply)
 	OpRemove Op = "remove"
 	OpRename Op = "rename"
+
+	// OpBootstrap and OpBootstrapAck are control messages, not filesystem
+	// mutations — Apply never sees them. They carry Fase 3's X3DH bootstrap
+	// material over the events subject (mirroring Fase 2's chunk-0
+	// Bootstrap-* headers, generalized to a stream with no fixed "chunk
+	// 0") so both sides of a Fase 5 Watcher session can derive matching
+	// Double Ratchet chains before any real Event needs encrypting or
+	// decrypting. See encrypt.go.
+	OpBootstrap    Op = "bootstrap"
+	OpBootstrapAck Op = "bootstrap_ack"
 )
 
 // Event is one filesystem mutation propagated between two Watcher sessions
@@ -41,6 +51,22 @@ type Event struct {
 	// Only set for OpWrite — see bridge.go for why OpRemove/OpRename aren't
 	// version-vector-tracked yet.
 	Version VersionVector `json:"version,omitempty"`
+
+	// Seq is the Double Ratchet chain sequence number Data was encrypted
+	// under (encrypt.go) — set only for an encrypted OpWrite, the same role
+	// Fase 2's Chunk-Sequence header plays for pipeline.ReceiveArchive: it
+	// lets Decrypt report a clear "out of order" error instead of a bare
+	// GCM authentication failure if a chain ever desyncs.
+	Seq uint32 `json:"seq,omitempty"`
+
+	// Bootstrap* fields only ride OpBootstrap/OpBootstrapAck (encrypt.go);
+	// every other Op leaves them empty. Raw bytes rather than *ecdh.PublicKey
+	// so this package's wire type stays free of crypto-library types, the
+	// same split Fase 2's pipeline package keeps between its own headers
+	// and x3dh.Store.
+	BootstrapInitiatorDHPub []byte `json:"bootstrap_initiator_dh_pub,omitempty"` // OpBootstrap only
+	BootstrapEphemeralPub   []byte `json:"bootstrap_ephemeral_pub,omitempty"`    // OpBootstrap and OpBootstrapAck
+	BootstrapUsedOTPID      uint32 `json:"bootstrap_used_otp_id,omitempty"`      // OpBootstrap only
 }
 
 // ContentHash returns the hex-encoded SHA-256 of data — the currency

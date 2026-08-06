@@ -36,22 +36,34 @@ type Request struct {
 	// receive or a Fase 5 watcher on RequestedDestPath.
 	RequestedDirection Direction `json:"requested_direction"`
 
+	// RequestedEncrypt tells the responder whether this session should run
+	// its payload through Fase 3's X3DH + Double Ratchet (share's
+	// --encrypt, or watch's — see internal/daemon.WatchSession and
+	// internal/syncfs's bootstrap dance). Signed for the same reason
+	// RequestedDestPath and RequestedDirection are: without it, a relay
+	// could silently strip an encryption request and downgrade the session
+	// to plaintext without either side noticing.
+	RequestedEncrypt bool `json:"requested_encrypt"`
+
 	Signature []byte `json:"signature"` // over SignedPayload()
 }
 
 // SignedPayload returns the exact bytes the requester signs and the
 // responder re-derives to verify. Beyond the Timestamp + Nonce called out
-// in Fase 1 §3 step 1, it also binds MachineID, RequestedDestPath, and
-// RequestedDirection (length-prefixed where variable-length) and PublicKey
-// into the signature: leaving any of those out would let a relay rewrite
-// them in transit without invalidating the signature, since they're the
-// only fields here not otherwise bound to the verification key.
-// RequestedDestPath in particular matters — an unsigned destination path
-// is a relay's invitation to redirect where an approved transfer writes on
-// disk. RequestedDirection matters too, if quieter: it decides whether the
-// responder starts a one-shot receive or a standing Watcher on that path.
+// in Fase 1 §3 step 1, it also binds MachineID, RequestedDestPath,
+// RequestedDirection, and RequestedEncrypt (length-prefixed where
+// variable-length) and PublicKey into the signature: leaving any of those
+// out would let a relay rewrite them in transit without invalidating the
+// signature, since they're the only fields here not otherwise bound to the
+// verification key. RequestedDestPath in particular matters — an unsigned
+// destination path is a relay's invitation to redirect where an approved
+// transfer writes on disk. RequestedDirection matters too, if quieter: it
+// decides whether the responder starts a one-shot receive or a standing
+// Watcher on that path. RequestedEncrypt matters for the same reason: an
+// unsigned encrypt flag is a relay's invitation to downgrade an encrypted
+// session to plaintext.
 func (r *Request) SignedPayload() []byte {
-	buf := make([]byte, 0, 4+8+len(r.Nonce)+4+len(r.MachineID)+4+len(r.RequestedDestPath)+4+len(r.PublicKey))
+	buf := make([]byte, 0, 4+8+len(r.Nonce)+4+len(r.MachineID)+4+len(r.RequestedDestPath)+4+1+len(r.PublicKey))
 	buf = binary.BigEndian.AppendUint32(buf, uint32(r.ProtocolVersion))
 	buf = binary.BigEndian.AppendUint64(buf, uint64(r.Timestamp.UnixNano()))
 	buf = append(buf, r.Nonce[:]...)
@@ -60,6 +72,11 @@ func (r *Request) SignedPayload() []byte {
 	buf = binary.BigEndian.AppendUint32(buf, uint32(len(r.RequestedDestPath)))
 	buf = append(buf, r.RequestedDestPath...)
 	buf = binary.BigEndian.AppendUint32(buf, uint32(r.RequestedDirection))
+	if r.RequestedEncrypt {
+		buf = append(buf, 1)
+	} else {
+		buf = append(buf, 0)
+	}
 	buf = append(buf, r.PublicKey...)
 	return buf
 }
@@ -81,6 +98,11 @@ type Params struct {
 	MaxPayloadBytes int64     `json:"max_payload_bytes"`
 	AllowedDestPath string    `json:"allowed_dest_path"`
 	Direction       Direction `json:"direction"`
+	// Encrypt mirrors Request.RequestedEncrypt (Responder.Handle copies it
+	// straight through, same as Direction) — internal/daemon.WatchSession
+	// reads this to decide whether to run the Fase 3 bootstrap dance before
+	// starting its Watcher.
+	Encrypt bool `json:"encrypt"`
 }
 
 // Response is what the responding node sends back, approved or not (Fase 1

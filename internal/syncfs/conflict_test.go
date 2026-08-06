@@ -76,7 +76,7 @@ func TestConflictDetectionWritesAsideInsteadOfOverwriting(t *testing.T) {
 	versions := syncfs.NewVersionStore()
 	done := make(chan error, 1)
 	go func() {
-		done <- syncfs.ReceiveChanges(ctx, cons, "node-observer", destRoot, echo, versions, onConflict)
+		done <- syncfs.ReceiveChanges(ctx, cons, "node-observer", destRoot, echo, versions, onConflict, nil)
 	}()
 
 	// Wait for both the winner file and a conflict file to show up.

@@ -41,9 +41,11 @@ func ServeHandshake(conn *natsgo.Conn, machineID string, r *handshake.Responder)
 // Response (Fase 1 §3 step 1: "abre un reloj de espera de 5 segundos").
 // destPath is what Fase 2/5 will write to on the responder if it approves —
 // pass "" for a handshake that isn't about to write anything. direction
-// distinguishes a one-shot `share` from a standing `watch` session.
-func RequestHandshake(conn *natsgo.Conn, id *identity.Identity, targetMachineID, destPath string, direction handshake.Direction, timeout time.Duration) (*handshake.Response, error) {
-	req, err := handshake.BuildRequest(id, destPath, direction)
+// distinguishes a one-shot `share` from a standing `watch` session. encrypt
+// requests Fase 3 end-to-end encryption for the session (share's
+// --encrypt, or watch's).
+func RequestHandshake(conn *natsgo.Conn, id *identity.Identity, targetMachineID, destPath string, direction handshake.Direction, encrypt bool, timeout time.Duration) (*handshake.Response, error) {
+	req, err := handshake.BuildRequest(id, destPath, direction, encrypt)
 	if err != nil {
 		return nil, err
 	}

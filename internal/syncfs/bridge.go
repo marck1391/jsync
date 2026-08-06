@@ -33,14 +33,21 @@ const eventFetchTimeout = 2 * time.Second
 // conflict (two nodes editing the same file) is the common, important
 // case; remove-vs-edit conflicts need different semantics and are left for
 // later.
-func PublishChanges(ctx context.Context, js jetstream.JetStream, subject, machineID, root string, changes <-chan watch.ChangeEvent, echo *EchoGuard, versions *VersionStore) error {
+//
+// enc, if non-nil, encrypts every OpWrite's Data with enc.SendChain (Fase
+// 3) before publishing — nil means the session is unencrypted, exactly as
+// before Fase 3's watch support existed. The caller must have already
+// completed the bootstrap dance (PublishBootstrap/ReceiveBootstrapAck or
+// their responder-side mirrors) before calling this, so enc.SendChain's
+// counter starts in lockstep with what the peer's enc.RecvChain expects.
+func PublishChanges(ctx context.Context, js jetstream.JetStream, subject, machineID, root string, changes <-chan watch.ChangeEvent, echo *EchoGuard, versions *VersionStore, enc *Encryption) error {
 	for {
 		select {
 		case cev, ok := <-changes:
 			if !ok {
 				return nil
 			}
-			if err := publishOne(ctx, js, subject, machineID, root, cev, echo, versions); err != nil {
+			if err := publishOne(ctx, js, subject, machineID, root, cev, echo, versions, enc); err != nil {
 				return err
 			}
 		case <-ctx.Done():
@@ -49,7 +56,7 @@ func PublishChanges(ctx context.Context, js jetstream.JetStream, subject, machin
 	}
 }
 
-func publishOne(ctx context.Context, js jetstream.JetStream, subject, machineID, root string, cev watch.ChangeEvent, echo *EchoGuard, versions *VersionStore) error {
+func publishOne(ctx context.Context, js jetstream.JetStream, subject, machineID, root string, cev watch.ChangeEvent, echo *EchoGuard, versions *VersionStore, enc *Encryption) error {
 	switch cev.Kind {
 	case watch.ChangeRescan:
 		// Fase 5's initial-reconciliation story isn't implemented yet (see
@@ -67,12 +74,24 @@ func publishOne(ctx context.Context, js jetstream.JetStream, subject, machineID,
 			// no longer exists.
 			return nil
 		}
+		// Hash is always computed on plaintext, encrypted or not: EchoGuard
+		// and VersionStore both operate on content identity, not on
+		// whatever happens to be on the wire — see Encryption's doc comment.
 		hash := ContentHash(data)
 		if echo.IsEcho(cev.RelPath, hash) {
 			return nil
 		}
 		version := versions.Bump(cev.RelPath, machineID)
-		return publish(ctx, js, subject, Event{Origin: machineID, Op: OpWrite, RelPath: cev.RelPath, ContentHash: hash, Data: data, Version: version})
+		ev := Event{Origin: machineID, Op: OpWrite, RelPath: cev.RelPath, ContentHash: hash, Data: data, Version: version}
+		if enc != nil {
+			ciphertext, seq, err := enc.SendChain.Encrypt(data, enc.AssociatedData)
+			if err != nil {
+				return fmt.Errorf("syncfs: encrypt %s: %w", cev.RelPath, err)
+			}
+			ev.Data = ciphertext
+			ev.Seq = seq
+		}
+		return publish(ctx, js, subject, ev)
 
 	case watch.ChangeRemoved:
 		if echo.IsEchoRemove(cev.RelPath) {
@@ -119,7 +138,12 @@ func publish(ctx context.Context, js jetstream.JetStream, subject string, ev Eve
 //
 // Runs until ctx is done or a Fetch/Apply error is unrecoverable; an empty
 // Fetch (nothing new) is normal idle behavior, not an error.
-func ReceiveChanges(ctx context.Context, cons jetstream.Consumer, machineID, destRoot string, echo *EchoGuard, versions *VersionStore, onConflict func(ev Event, conflictPath string)) error {
+//
+// enc, if non-nil, decrypts every peer-originated OpWrite's Data with
+// enc.RecvChain (Fase 3) before Reconcile/Apply ever sees it — nil means
+// the session is unencrypted. The caller must have already completed the
+// bootstrap dance, same requirement as PublishChanges.
+func ReceiveChanges(ctx context.Context, cons jetstream.Consumer, machineID, destRoot string, echo *EchoGuard, versions *VersionStore, onConflict func(ev Event, conflictPath string), enc *Encryption) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -142,6 +166,34 @@ func ReceiveChanges(ctx context.Context, cons jetstream.Consumer, machineID, des
 			if ev.Origin == machineID {
 				_ = msg.Ack() // our own publish, echoed back by the shared stream — nothing to apply
 				continue
+			}
+
+			if ev.Op == OpBootstrap || ev.Op == OpBootstrapAck {
+				// Should never reach here in a well-behaved session — both
+				// are consumed by ReceiveBootstrap/ReceiveBootstrapAck
+				// before this loop ever starts (encrypt.go). Ack and skip
+				// rather than falling into Apply's "unknown op" error, as
+				// defense in depth, not the expected path.
+				_ = msg.Ack()
+				continue
+			}
+
+			// Decrypted unconditionally, before Reconcile/conflict/stale
+			// short-circuit below: enc.RecvChain's counter must advance
+			// exactly once for every OpWrite the peer actually published,
+			// regardless of what this node then does with the result. A
+			// stale/conflict message never applied is still one the peer's
+			// SendChain spent a sequence number on — skipping Decrypt here
+			// for such a message would desync this chain from the peer's
+			// forever, breaking every OpWrite for the rest of the session
+			// with an opaque GCM authentication failure.
+			if enc != nil && ev.Op == OpWrite {
+				plaintext, err := enc.RecvChain.Decrypt(ev.Data, enc.AssociatedData, ev.Seq)
+				if err != nil {
+					_ = msg.Nak()
+					return fmt.Errorf("syncfs: decrypt %s: %w", ev.RelPath, err)
+				}
+				ev.Data = plaintext
 			}
 
 			if ev.Op == OpWrite {
