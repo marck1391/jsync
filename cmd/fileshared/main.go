@@ -123,7 +123,7 @@ func run() error {
 			return
 		}
 		go func() {
-			if err := daemon.ReceiveSession(ctx, node.Conn, js, sess); err != nil {
+			if err := daemon.ReceiveSession(ctx, node.Conn, js, sess, prekeys, id.PublicKey); err != nil {
 				fmt.Fprintf(os.Stderr, "fileshared: receive session %s: %v\n", sess.ID, err)
 			}
 		}()

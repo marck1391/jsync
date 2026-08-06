@@ -12,8 +12,10 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"filesharer/internal/crypto/x3dh"
 	"filesharer/internal/daemon"
 	"filesharer/internal/handshake"
+	"filesharer/internal/identity"
 	"filesharer/internal/pipeline"
 	fsnats "filesharer/internal/transport/nats"
 )
@@ -33,11 +35,29 @@ func bootstrapTestNode(t *testing.T) *fsnats.Node {
 	return node
 }
 
+func newResponderPrekeys(t *testing.T) (*x3dh.Store, *identity.Identity) {
+	t.Helper()
+	id, err := identity.Generate("responder")
+	if err != nil {
+		t.Fatalf("Generate responder identity: %v", err)
+	}
+	store, err := x3dh.NewStore(id.PublicKey, id.PrivateKey, 1)
+	if err != nil {
+		t.Fatalf("x3dh.NewStore: %v", err)
+	}
+	return store, id
+}
+
 func TestReceiveSessionSuccess(t *testing.T) {
 	node := bootstrapTestNode(t)
 	js, err := jetstream.New(node.Conn)
 	if err != nil {
 		t.Fatalf("jetstream.New: %v", err)
+	}
+	prekeys, responderID := newResponderPrekeys(t)
+	initiatorID, err := identity.Generate("initiator")
+	if err != nil {
+		t.Fatalf("Generate initiator: %v", err)
 	}
 
 	dir := t.TempDir()
@@ -50,7 +70,7 @@ func TestReceiveSessionSuccess(t *testing.T) {
 	}
 
 	destDir := filepath.Join(dir, "final", "dest")
-	sess := &handshake.Session{ID: "sess-success", DestPath: destDir}
+	sess := &handshake.Session{ID: "sess-success", DestPath: destDir, PeerPublicKey: initiatorID.PublicKey}
 
 	statusCh := subscribeStatus(t, node.Conn, sess.ID)
 
@@ -61,10 +81,10 @@ func TestReceiveSessionSuccess(t *testing.T) {
 	go func() {
 		ar := pipeline.NewArchiveReader(srcRoot)
 		defer ar.Close()
-		sendDone <- publishOnceStreamExists(ctx, js, sess.ID, ar)
+		sendDone <- publishOnceStreamExists(ctx, js, sess.ID, ar, nil)
 	}()
 
-	if err := daemon.ReceiveSession(ctx, node.Conn, js, sess); err != nil {
+	if err := daemon.ReceiveSession(ctx, node.Conn, js, sess, prekeys, responderID.PublicKey); err != nil {
 		t.Fatalf("ReceiveSession: %v", err)
 	}
 	if err := <-sendDone; err != nil {
@@ -85,12 +105,95 @@ func TestReceiveSessionSuccess(t *testing.T) {
 	}
 }
 
+// TestReceiveSessionEncryptedSuccess mirrors TestReceiveSessionSuccess but
+// drives the sender side the way cmd/fileshare's --encrypt actually does:
+// real X3DH against the responder's Bundle, a real Double Ratchet chain,
+// chunk 0 carrying the bootstrap headers. Proves daemon.ReceiveSession
+// derives a matching chain purely from what's on the wire and decrypts
+// correctly, not just that internal/pipeline can in isolation.
+func TestReceiveSessionEncryptedSuccess(t *testing.T) {
+	node := bootstrapTestNode(t)
+	js, err := jetstream.New(node.Conn)
+	if err != nil {
+		t.Fatalf("jetstream.New: %v", err)
+	}
+	prekeys, responderID := newResponderPrekeys(t)
+	initiatorID, err := identity.Generate("initiator")
+	if err != nil {
+		t.Fatalf("Generate initiator: %v", err)
+	}
+	initiatorStore, err := x3dh.NewStore(initiatorID.PublicKey, initiatorID.PrivateKey, 0)
+	if err != nil {
+		t.Fatalf("initiator x3dh.NewStore: %v", err)
+	}
+
+	dir := t.TempDir()
+	srcRoot := filepath.Join(dir, "src")
+	if err := os.MkdirAll(srcRoot, 0o755); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "secret.txt"), []byte("only the responder should ever decrypt this"), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	destDir := filepath.Join(dir, "final", "dest")
+	sess := &handshake.Session{ID: "sess-encrypted", DestPath: destDir, PeerPublicKey: initiatorID.PublicKey}
+	statusCh := subscribeStatus(t, node.Conn, sess.ID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// This is exactly what the handshake response would have carried.
+	bundle := prekeys.Bundle()
+	chain, ephemeralPub, usedOTPID, err := initiatorStore.DeriveInitiatorChain(bundle)
+	if err != nil {
+		t.Fatalf("DeriveInitiatorChain: %v", err)
+	}
+	enc := &pipeline.Encryption{
+		Chain:          chain,
+		AssociatedData: x3dh.AssociatedData(initiatorID.PublicKey, responderID.PublicKey),
+		Bootstrap: pipeline.EncryptionBootstrap{
+			InitiatorDHPub: initiatorStore.IdentityDHPublicKey(),
+			EphemeralPub:   ephemeralPub,
+			UsedOTPID:      usedOTPID,
+		},
+	}
+
+	sendDone := make(chan error, 1)
+	go func() {
+		ar := pipeline.NewArchiveReader(srcRoot)
+		defer ar.Close()
+		sendDone <- publishOnceStreamExists(ctx, js, sess.ID, ar, enc)
+	}()
+
+	if err := daemon.ReceiveSession(ctx, node.Conn, js, sess, prekeys, responderID.PublicKey); err != nil {
+		t.Fatalf("ReceiveSession: %v", err)
+	}
+	if err := <-sendDone; err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(destDir, "secret.txt"))
+	if err != nil {
+		t.Fatalf("read committed file: %v", err)
+	}
+	if string(data) != "only the responder should ever decrypt this" {
+		t.Errorf("content = %q, want the original plaintext", data)
+	}
+
+	st := waitStatus(t, statusCh)
+	if !st.Completed {
+		t.Errorf("status.Completed = false, want true (error: %s)", st.Error)
+	}
+}
+
 func TestReceiveSessionCorruptStreamFailsAndCleansUp(t *testing.T) {
 	node := bootstrapTestNode(t)
 	js, err := jetstream.New(node.Conn)
 	if err != nil {
 		t.Fatalf("jetstream.New: %v", err)
 	}
+	prekeys, responderID := newResponderPrekeys(t)
 
 	dir := t.TempDir()
 	destDir := filepath.Join(dir, "final", "dest")
@@ -114,7 +217,7 @@ func TestReceiveSessionCorruptStreamFailsAndCleansUp(t *testing.T) {
 		t.Fatalf("publish corrupt chunk: %v", err)
 	}
 
-	if err := daemon.ReceiveSession(ctx, node.Conn, js, sess); err == nil {
+	if err := daemon.ReceiveSession(ctx, node.Conn, js, sess, prekeys, responderID.PublicKey); err == nil {
 		t.Fatal("ReceiveSession: expected an error for a corrupt stream")
 	}
 
@@ -139,8 +242,8 @@ func TestReceiveSessionCorruptStreamFailsAndCleansUp(t *testing.T) {
 // stream (it races the send goroutine on purpose, mirroring how the real
 // Daemon and CLI run as separate processes with no shared ordering
 // guarantee beyond "the approved handshake happened first") before
-// publishing into it.
-func publishOnceStreamExists(ctx context.Context, js jetstream.JetStream, sessionID string, r io.Reader) error {
+// publishing into it. enc may be nil for a plaintext transfer.
+func publishOnceStreamExists(ctx context.Context, js jetstream.JetStream, sessionID string, r io.Reader, enc *pipeline.Encryption) error {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		if _, err := js.Stream(ctx, fsnats.StreamName(sessionID)); err == nil {
@@ -151,7 +254,7 @@ func publishOnceStreamExists(ctx context.Context, js jetstream.JetStream, sessio
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	return pipeline.PublishArchive(ctx, js, fsnats.StreamSubject(sessionID), r, pipeline.DefaultChunkSize)
+	return pipeline.PublishArchive(ctx, js, fsnats.StreamSubject(sessionID), r, pipeline.DefaultChunkSize, enc)
 }
 
 func subscribeStatus(t *testing.T, conn *natsgo.Conn, sessionID string) <-chan daemon.Status {

@@ -19,6 +19,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"filesharer/internal/config"
+	"filesharer/internal/crypto/x3dh"
 	"filesharer/internal/daemon"
 	"filesharer/internal/identity"
 	"filesharer/internal/pipeline"
@@ -152,11 +153,40 @@ func cmdKeys(args []string) error {
 	}
 }
 
+// buildEncryption loads this node's own X3DH material (the same
+// prekeys.json a fileshared responder would use, generated on first use if
+// it doesn't exist yet — a plain `fileshare share` never needs to have run
+// `fileshared` first) and runs the initiator side of X3DH against the
+// responder's bundle from the handshake response, returning a ready
+// pipeline.Encryption for PublishArchive.
+func buildEncryption(cfg *config.Config, id *identity.Identity, bundle x3dh.Bundle) (*pipeline.Encryption, error) {
+	store, err := x3dh.LoadStore(cfg.PrekeysPath, id.PublicKey, id.PrivateKey, cfg.OneTimePreKeyCount)
+	if err != nil {
+		return nil, fmt.Errorf("load prekeys: %w", err)
+	}
+
+	chain, ephemeralPub, usedOTPID, err := store.DeriveInitiatorChain(bundle)
+	if err != nil {
+		return nil, fmt.Errorf("X3DH: %w", err)
+	}
+
+	return &pipeline.Encryption{
+		Chain:          chain,
+		AssociatedData: x3dh.AssociatedData(id.PublicKey, bundle.IdentityKey),
+		Bootstrap: pipeline.EncryptionBootstrap{
+			InitiatorDHPub: store.IdentityDHPublicKey(),
+			EphemeralPub:   ephemeralPub,
+			UsedOTPID:      usedOTPID,
+		},
+	}, nil
+}
+
 func cmdShare(args []string) error {
 	fs := flag.NewFlagSet("share", flag.ContinueOnError)
 	cfgPath := fs.String("config", "config.yaml", "path to daemon config file")
 	timeout := fs.Duration("timeout", 10*time.Second, "handshake timeout")
 	transferTimeout := fs.Duration("transfer-timeout", 2*time.Minute, "how long to wait for the transfer to finish after the handshake is approved")
+	encrypt := fs.Bool("encrypt", false, "end-to-end encrypt the transfer (Fase 3: X3DH + Double Ratchet, chunk contents unreadable to the NATS broker)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -228,12 +258,21 @@ func cmdShare(args []string) error {
 	}
 	defer statusSub.Unsubscribe()
 
+	var enc *pipeline.Encryption
+	if *encrypt {
+		enc, err = buildEncryption(cfg, id, resp.Bundle)
+		if err != nil {
+			return fmt.Errorf("set up encryption: %w", err)
+		}
+		fmt.Println("encryption: on (X3DH + Double Ratchet)")
+	}
+
 	ar := pipeline.NewArchiveReader(srcPath)
 	defer ar.Close()
 
 	pubCtx, cancel := context.WithTimeout(context.Background(), *transferTimeout)
 	defer cancel()
-	if err := pipeline.PublishArchive(pubCtx, js, fsnats.StreamSubject(resp.SessionID), ar, pipeline.DefaultChunkSize); err != nil {
+	if err := pipeline.PublishArchive(pubCtx, js, fsnats.StreamSubject(resp.SessionID), ar, pipeline.DefaultChunkSize, enc); err != nil {
 		return fmt.Errorf("send %s: %w", srcPath, err)
 	}
 	fmt.Println("all chunks sent, waiting for", targetMachineID, "to finish writing")

@@ -2,6 +2,7 @@ package x3dh
 
 import (
 	"crypto/ecdh"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
@@ -160,6 +161,16 @@ func (s *Store) deriveResponder(initiatorIdentityDHPub, ephemeralPub *ecdh.Publi
 		return nil, nil, err
 	}
 	return sk, signedPriv, nil
+}
+
+// AssociatedData is the Double Ratchet's AD = IKA || IKB (Fase 3 §"Root
+// Key / Chain Key / Message Key"): the two parties' Ed25519 identity keys,
+// initiator first, authenticated (via AES-GCM) on every chunk without
+// re-transmitting them. Both sides must compute this the same way —
+// initiatorIdentityKey first, always — or every chunk will fail to
+// decrypt despite SK matching.
+func AssociatedData(initiatorIdentityKey, responderIdentityKey ed25519.PublicKey) []byte {
+	return concat(initiatorIdentityKey, responderIdentityKey)
 }
 
 // IdentityDHPublicKey exposes this Store's static X25519 identity key —

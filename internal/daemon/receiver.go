@@ -2,12 +2,16 @@ package daemon
 
 import (
 	"context"
+	"crypto/ecdh"
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"filesharer/internal/crypto/ratchet"
+	"filesharer/internal/crypto/x3dh"
 	"filesharer/internal/handshake"
 	"filesharer/internal/pipeline"
 	fsnats "filesharer/internal/transport/nats"
@@ -26,10 +30,17 @@ type Status struct {
 
 // ReceiveSession runs the Fase 2 receiving side for one approved handshake
 // session (Fase 4 §Paso 1-4): creates the session's JetStream stream and
-// consumer, receives and extracts the incoming archive into a sandbox,
-// commits it atomically to sess.DestPath on success — or tears the sandbox
-// down on any failure — and publishes exactly one Status message when done.
-func ReceiveSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStream, sess *handshake.Session) error {
+// consumer, receives (transparently decrypting, if the sender encrypted —
+// Fase 3) and extracts the incoming archive into a sandbox, commits it
+// atomically to sess.DestPath on success — or tears the sandbox down on any
+// failure — and publishes exactly one Status message when done.
+//
+// prekeys is this node's own X3DH material, used only if the sender turns
+// out to have encrypted the transfer (chunk 0 carries an Encrypted header
+// or it doesn't — see pipeline.ReceiveArchive); localIdentityPub is this
+// node's Ed25519 identity key, needed to reconstruct the same Associated
+// Data the sender authenticated each chunk against.
+func ReceiveSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStream, sess *handshake.Session, prekeys *x3dh.Store, localIdentityPub ed25519.PublicKey) error {
 	if _, err := fsnats.EnsureStream(ctx, js, sess.ID); err != nil {
 		return publishStatus(conn, sess.ID, fmt.Errorf("ensure stream: %w", err))
 	}
@@ -38,8 +49,13 @@ func ReceiveSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStre
 		return publishStatus(conn, sess.ID, fmt.Errorf("ensure consumer: %w", err))
 	}
 
+	associatedData := x3dh.AssociatedData(sess.PeerPublicKey, localIdentityPub)
+	deriveChain := pipeline.DeriveChainFunc(func(initiatorDHPub, ephemeralPub *ecdh.PublicKey, usedOTPID uint32) (*ratchet.Chain, error) {
+		return prekeys.DeriveResponderChain(initiatorDHPub, ephemeralPub, usedOTPID)
+	})
+
 	sandboxDir := pipeline.SandboxPath(sess.DestPath, sess.ID)
-	pr, recvDone := pipeline.ReceiveArchive(ctx, consumer)
+	pr, recvDone := pipeline.ReceiveArchive(ctx, consumer, associatedData, deriveChain)
 	// If ExtractArchive below returns early on error without draining pr
 	// to EOF, the goroutine behind ReceiveArchive can be left blocked
 	// forever on a pipe Write with nothing left to read it — pr.Close()
