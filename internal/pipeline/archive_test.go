@@ -156,6 +156,53 @@ func TestNewArchiveReaderResendsChangedFile(t *testing.T) {
 	}
 }
 
+func TestEstimateSendSizeSumsAllFiles(t *testing.T) {
+	root := t.TempDir()
+	writeTestTree(t, root)
+
+	want := int64(len("hello from a") + len("hello from b") + len("hello from c, nested deeper"))
+	got, err := EstimateSendSize(root, nil)
+	if err != nil {
+		t.Fatalf("EstimateSendSize: %v", err)
+	}
+	if got != want {
+		t.Errorf("EstimateSendSize = %d, want %d", got, want)
+	}
+}
+
+func TestEstimateSendSizeExcludesSkippedFiles(t *testing.T) {
+	root := t.TempDir()
+	writeTestTree(t, root)
+
+	// a.txt is in skip (regardless of hash — EstimateSendSize trusts
+	// presence, it doesn't re-hash) — should be excluded from the total.
+	skip := map[string]string{"a.txt": "irrelevant-for-this-check"}
+	want := int64(len("hello from b") + len("hello from c, nested deeper"))
+	got, err := EstimateSendSize(root, skip)
+	if err != nil {
+		t.Fatalf("EstimateSendSize: %v", err)
+	}
+	if got != want {
+		t.Errorf("EstimateSendSize with skip = %d, want %d", got, want)
+	}
+}
+
+func TestEstimateSendSizeSingleFile(t *testing.T) {
+	root := t.TempDir()
+	filePath := filepath.Join(root, "single.txt")
+	if err := os.WriteFile(filePath, []byte("just one file"), 0o644); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	got, err := EstimateSendSize(filePath, nil)
+	if err != nil {
+		t.Fatalf("EstimateSendSize: %v", err)
+	}
+	if got != int64(len("just one file")) {
+		t.Errorf("EstimateSendSize = %d, want %d", got, len("just one file"))
+	}
+}
+
 func TestNewArchiveReaderSingleFile(t *testing.T) {
 	root := t.TempDir()
 	filePath := filepath.Join(root, "single.txt")

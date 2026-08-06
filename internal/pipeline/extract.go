@@ -27,13 +27,15 @@ func SandboxPath(destDir, sessionID string) string {
 // AbortSandbox if it returns an error.
 //
 // onFileComplete, if non-nil, is called with a regular file's relative tar
-// path and its sha256 hex digest right after that file's bytes have been
-// fully copied into sandboxDir — never for a file whose copy is cut short
-// by a read/write error (a network drop mid-file never calls it for that
-// file). This is the signal internal/daemon's resume support (Fase 2's
-// "recuperación de red") needs to know which files in a partially-received
-// sandbox are safe to keep rather than re-request.
-func ExtractArchive(r io.Reader, sandboxDir string, onFileComplete func(relPath, contentHash string)) error {
+// path, its sha256 hex digest, and its size, right after that file's bytes
+// have been fully copied into sandboxDir — never for a file whose copy is
+// cut short by a read/write error (a network drop mid-file never calls it
+// for that file). The path+hash is the signal internal/daemon's resume
+// support (Fase 2 "recuperación de red") needs to know which files in a
+// partially-received sandbox are safe to keep rather than re-request; the
+// size is what Fase 2's progress reporting accumulates against
+// EstimateSendSize's upfront estimate.
+func ExtractArchive(r io.Reader, sandboxDir string, onFileComplete func(relPath, contentHash string, size int64)) error {
 	if err := os.MkdirAll(sandboxDir, 0o700); err != nil {
 		return fmt.Errorf("pipeline: create sandbox %s: %w", sandboxDir, err)
 	}
@@ -68,12 +70,12 @@ func ExtractArchive(r io.Reader, sandboxDir string, onFileComplete func(relPath,
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				return fmt.Errorf("pipeline: mkdir %s: %w", filepath.Dir(target), err)
 			}
-			hash, err := writeRegularFile(target, tr, os.FileMode(hdr.Mode))
+			hash, size, err := writeRegularFile(target, tr, os.FileMode(hdr.Mode))
 			if err != nil {
 				return err
 			}
 			if onFileComplete != nil {
-				onFileComplete(hdr.Name, hash)
+				onFileComplete(hdr.Name, hash, size)
 			}
 		default:
 			// Anything else (symlinks, devices, ...) is skipped — matches
@@ -82,23 +84,24 @@ func ExtractArchive(r io.Reader, sandboxDir string, onFileComplete func(relPath,
 	}
 }
 
-// writeRegularFile copies r into target and returns its sha256 hex digest,
-// computed in the same pass (via io.MultiWriter) rather than a separate
-// read afterward.
-func writeRegularFile(target string, r io.Reader, mode os.FileMode) (string, error) {
+// writeRegularFile copies r into target and returns its sha256 hex digest
+// and size, both computed/measured in the same pass (via io.MultiWriter and
+// io.Copy's own return value) rather than a separate read or stat afterward.
+func writeRegularFile(target string, r io.Reader, mode os.FileMode) (hash string, size int64, err error) {
 	if mode == 0 {
 		mode = 0o600
 	}
 	f, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 	if err != nil {
-		return "", fmt.Errorf("pipeline: create %s: %w", target, err)
+		return "", 0, fmt.Errorf("pipeline: create %s: %w", target, err)
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(f, h), r); err != nil {
-		return "", fmt.Errorf("pipeline: write %s: %w", target, err)
+	written, err := io.Copy(io.MultiWriter(f, h), r)
+	if err != nil {
+		return "", 0, fmt.Errorf("pipeline: write %s: %w", target, err)
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(h.Sum(nil)), written, nil
 }
 
 // safeJoin joins base and a tar entry name, rejecting one that would

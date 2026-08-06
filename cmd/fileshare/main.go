@@ -30,6 +30,7 @@ import (
 	"filesharer/internal/identity"
 	"filesharer/internal/ignore"
 	"filesharer/internal/pipeline"
+	"filesharer/internal/progress"
 	"filesharer/internal/syncfs"
 	fsnats "filesharer/internal/transport/nats"
 	"filesharer/internal/watch"
@@ -354,8 +355,12 @@ func shareAttempt(conn *natsgo.Conn, js jetstream.JetStream, cfg *config.Config,
 	// Subscribe to the completion status before publishing a single byte —
 	// the daemon could in principle finish before we'd get around to
 	// subscribing afterward, and NATS core pub/sub drops messages nobody
-	// was listening for yet.
-	statusCh := make(chan daemon.Status, 1)
+	// was listening for yet. Buffered well past 1: the daemon now
+	// publishes periodic progress pings, not just one terminal message
+	// (Fase 2 progress reporting), and a buffer of 1 risks blocking the
+	// NATS subscription callback if this goroutine doesn't drain
+	// immediately.
+	statusCh := make(chan daemon.Status, 16)
 	statusSub, err := conn.Subscribe(fsnats.StatusSubject(resp.SessionID), func(msg *natsgo.Msg) {
 		var st daemon.Status
 		if err := json.Unmarshal(msg.Data, &st); err == nil {
@@ -385,25 +390,57 @@ func shareAttempt(conn *natsgo.Conn, js jetstream.JetStream, cfg *config.Config,
 		fmt.Printf("resuming: %s already has %d file(s) from a previous attempt, skipping any that haven't changed\n", targetMachineID, len(skip))
 	}
 
+	totalBytes, err := pipeline.EstimateSendSize(srcPath, skip)
+	if err != nil {
+		return fmt.Errorf("estimate size of %s: %w", srcPath, err)
+	}
+
 	ar := pipeline.NewArchiveReader(srcPath, skip)
 	defer ar.Close()
 
 	pubCtx, cancel := context.WithTimeout(context.Background(), transferTimeout)
 	defer cancel()
-	if err := pipeline.PublishArchive(pubCtx, js, fsnats.StreamSubject(resp.SessionID), ar, pipeline.DefaultChunkSize, enc); err != nil {
+	if err := pipeline.PublishArchive(pubCtx, js, fsnats.StreamSubject(resp.SessionID), ar, pipeline.DefaultChunkSize, enc, totalBytes); err != nil {
 		return fmt.Errorf("send %s: %w", srcPath, err)
 	}
 	fmt.Println("all chunks sent, waiting for", targetMachineID, "to finish writing")
 
-	select {
-	case st := <-statusCh:
-		if !st.Completed {
-			return fmt.Errorf("%s failed to write %s: %s", targetMachineID, destPath, st.Error)
+	// A progress ping proves the transfer is still alive, so it resets
+	// this deadline instead of letting it run out from the moment the
+	// last byte was sent — a large-but-healthy transfer that legitimately
+	// takes longer than transferTimeout to fully extract and commit no
+	// longer times out spuriously partway through. Only silence (nothing
+	// at all, not even a progress ping, for transferTimeout) is treated
+	// as stalled.
+	timer := time.NewTimer(transferTimeout)
+	defer timer.Stop()
+	printedProgress := false
+	for {
+		select {
+		case st := <-statusCh:
+			if !st.Final {
+				fmt.Print(progress.Line(st.BytesReceived, st.TotalBytes))
+				printedProgress = true
+				if !timer.Stop() {
+					<-timer.C
+				}
+				timer.Reset(transferTimeout)
+				continue
+			}
+			if printedProgress {
+				fmt.Println()
+			}
+			if !st.Completed {
+				return fmt.Errorf("%s failed to write %s: %s", targetMachineID, destPath, st.Error)
+			}
+			fmt.Printf("done: %s -> %s:%s\n", srcPath, targetMachineID, destPath)
+			return nil
+		case <-timer.C:
+			if printedProgress {
+				fmt.Println()
+			}
+			return fmt.Errorf("timed out after %s waiting for %s to confirm the write", transferTimeout, targetMachineID)
 		}
-		fmt.Printf("done: %s -> %s:%s\n", srcPath, targetMachineID, destPath)
-		return nil
-	case <-time.After(transferTimeout):
-		return fmt.Errorf("timed out after %s waiting for %s to confirm the write", transferTimeout, targetMachineID)
 	}
 }
 

@@ -60,10 +60,10 @@ func TestSendReceiveCommitRoundTrip(t *testing.T) {
 	go func() {
 		ar := pipeline.NewArchiveReader(srcRoot, nil)
 		defer ar.Close()
-		sendErrCh <- pipeline.PublishArchive(ctx, js, subject, ar, smallChunkSize, nil)
+		sendErrCh <- pipeline.PublishArchive(ctx, js, subject, ar, smallChunkSize, nil, 0)
 	}()
 
-	pr, recvDone := pipeline.ReceiveArchive(ctx, consumer, nil, nil)
+	pr, recvDone := pipeline.ReceiveArchive(ctx, consumer, nil, nil, nil)
 
 	dir := t.TempDir()
 	destDir := filepath.Join(dir, "final", "dest")
@@ -180,10 +180,10 @@ func TestSendReceiveCommitRoundTripEncrypted(t *testing.T) {
 	go func() {
 		ar := pipeline.NewArchiveReader(srcRoot, nil)
 		defer ar.Close()
-		sendErrCh <- pipeline.PublishArchive(ctx, js, subject, ar, smallChunkSize, enc)
+		sendErrCh <- pipeline.PublishArchive(ctx, js, subject, ar, smallChunkSize, enc, 0)
 	}()
 
-	pr, recvDone := pipeline.ReceiveArchive(ctx, consumer, ad, deriveChain)
+	pr, recvDone := pipeline.ReceiveArchive(ctx, consumer, ad, deriveChain, nil)
 
 	dir := t.TempDir()
 	destDir := filepath.Join(dir, "final", "dest")

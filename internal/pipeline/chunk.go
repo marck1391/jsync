@@ -26,6 +26,11 @@ const (
 	HeaderBootstrapDHPub     = "Bootstrap-Initiator-Dh-Pub"
 	HeaderBootstrapEphemeral = "Bootstrap-Ephemeral-Pub"
 	HeaderBootstrapOTPID     = "Bootstrap-Used-Otp-Id"
+
+	// HeaderTotalBytes only ever rides chunk 0, carrying EstimateSendSize's
+	// upfront (uncompressed, approximate) total — Fase 2 progress
+	// reporting. Absent or "0" means unknown, not zero-length.
+	HeaderTotalBytes = "Total-Bytes"
 )
 
 // DefaultChunkSize follows Fase 2 §2's "exactamente 512 KB o 1 MB", picking
@@ -62,8 +67,10 @@ type Encryption struct {
 // publishes each as a JetStream message on subject, tagged with
 // Chunk-Sequence and Is-Final-Chunk (Fase 2 §2). If enc is non-nil, each
 // chunk is encrypted with enc.Chain before publishing (Fase 3), and chunk 0
-// additionally carries enc.Bootstrap as headers.
-func PublishArchive(ctx context.Context, js jetstream.JetStream, subject string, r io.Reader, chunkSize int, enc *Encryption) error {
+// additionally carries enc.Bootstrap as headers. totalBytes, if > 0, rides
+// chunk 0 as HeaderTotalBytes for the receiver's progress reporting — pass
+// 0 if unknown (EstimateSendSize failed, or the caller doesn't care).
+func PublishArchive(ctx context.Context, js jetstream.JetStream, subject string, r io.Reader, chunkSize int, enc *Encryption, totalBytes int64) error {
 	if chunkSize <= 0 {
 		chunkSize = DefaultChunkSize
 	}
@@ -98,6 +105,9 @@ func PublishArchive(ctx context.Context, js jetstream.JetStream, subject string,
 
 		msg.Header.Set(HeaderChunkSequence, strconv.Itoa(seq))
 		msg.Header.Set(HeaderIsFinalChunk, strconv.FormatBool(isFinal))
+		if seq == 0 && totalBytes > 0 {
+			msg.Header.Set(HeaderTotalBytes, strconv.FormatInt(totalBytes, 10))
+		}
 
 		if _, err := js.PublishMsg(ctx, msg); err != nil {
 			return fmt.Errorf("pipeline: publish chunk %d: %w", seq, err)
@@ -142,12 +152,17 @@ type DeriveChainFunc func(initiatorDHPub, ephemeralPub *ecdh.PublicKey, usedOTPI
 // "Manejo de Errores" for the coarser, session-level recovery this backs
 // onto today (sandbox kept intact for a grace period, full re-send on
 // reconnect) rather than sub-session chunk replay.
-func ReceiveArchive(ctx context.Context, cons jetstream.Consumer, associatedData []byte, deriveChain DeriveChainFunc) (io.ReadCloser, <-chan error) {
+//
+// onTotalBytes, if non-nil, is called at most once, when chunk 0 arrives,
+// with whatever HeaderTotalBytes carried (0 if the header was absent —
+// the sender's PublishArchive didn't have an estimate). Fase 2 progress
+// reporting; nil is fine for a caller that doesn't report progress.
+func ReceiveArchive(ctx context.Context, cons jetstream.Consumer, associatedData []byte, deriveChain DeriveChainFunc, onTotalBytes func(int64)) (io.ReadCloser, <-chan error) {
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
 
 	go func() {
-		err := receiveLoop(ctx, cons, pw, associatedData, deriveChain)
+		err := receiveLoop(ctx, cons, pw, associatedData, deriveChain, onTotalBytes)
 		pw.CloseWithError(err)
 		done <- err
 	}()
@@ -155,7 +170,7 @@ func ReceiveArchive(ctx context.Context, cons jetstream.Consumer, associatedData
 	return pr, done
 }
 
-func receiveLoop(ctx context.Context, cons jetstream.Consumer, pw *io.PipeWriter, associatedData []byte, deriveChain DeriveChainFunc) error {
+func receiveLoop(ctx context.Context, cons jetstream.Consumer, pw *io.PipeWriter, associatedData []byte, deriveChain DeriveChainFunc, onTotalBytes func(int64)) error {
 	wantSeq := 0
 	var chain *ratchet.Chain
 
@@ -179,6 +194,11 @@ func receiveLoop(ctx context.Context, cons jetstream.Consumer, pw *io.PipeWriter
 				return fmt.Errorf("pipeline: chunk out of order: got %d, want %d", seq, wantSeq)
 			}
 			isFinal := msg.Headers().Get(HeaderIsFinalChunk) == "true"
+
+			if seq == 0 && onTotalBytes != nil {
+				total, _ := strconv.ParseInt(msg.Headers().Get(HeaderTotalBytes), 10, 64)
+				onTotalBytes(total)
+			}
 
 			payload := msg.Data()
 			if msg.Headers().Get(HeaderEncrypted) == "true" {

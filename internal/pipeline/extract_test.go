@@ -22,7 +22,12 @@ func TestExtractArchiveRoundTrip(t *testing.T) {
 	defer ar.Close()
 
 	completed := map[string]string{}
-	if err := ExtractArchive(ar, sandbox, func(relPath, hash string) { completed[relPath] = hash }); err != nil {
+	sizes := map[string]int64{}
+	onFileComplete := func(relPath, hash string, size int64) {
+		completed[relPath] = hash
+		sizes[relPath] = size
+	}
+	if err := ExtractArchive(ar, sandbox, onFileComplete); err != nil {
 		t.Fatalf("ExtractArchive: %v", err)
 	}
 
@@ -42,6 +47,9 @@ func TestExtractArchiveRoundTrip(t *testing.T) {
 		wantHash := sha256.Sum256(want)
 		if completed[rel] != hex.EncodeToString(wantHash[:]) {
 			t.Errorf("onFileComplete hash for %s = %q, want %x", rel, completed[rel], wantHash)
+		}
+		if sizes[rel] != int64(len(want)) {
+			t.Errorf("onFileComplete size for %s = %d, want %d", rel, sizes[rel], len(want))
 		}
 	}
 	if len(completed) != 3 {
@@ -75,7 +83,7 @@ func TestExtractArchiveOnFileCompleteSkipsTruncatedFile(t *testing.T) {
 	dir := t.TempDir()
 	sandbox := filepath.Join(dir, "sandbox")
 	completed := map[string]string{}
-	err = ExtractArchive(bytes.NewReader(truncated), sandbox, func(relPath, hash string) { completed[relPath] = hash })
+	err = ExtractArchive(bytes.NewReader(truncated), sandbox, func(relPath, hash string, size int64) { completed[relPath] = hash })
 	if err == nil {
 		t.Fatal("ExtractArchive: expected an error for a truncated stream")
 	}

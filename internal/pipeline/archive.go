@@ -136,6 +136,66 @@ func addFileToTar(tw *tar.Writer, absPath, relPath string, info fs.FileInfo, ski
 	return nil
 }
 
+// EstimateSendSize walks root the same way NewArchiveReader will and sums
+// the on-disk size of every regular file that will actually be archived —
+// a lightweight upfront estimate (Fase 2 progress reporting) of what
+// NewArchiveReader can only know lazily, one buffer at a time, as it
+// streams. It's an estimate, not a guarantee: a file listed in skip is
+// assumed to be excluded without re-hashing it here (avoiding a second
+// full read of every already-resumed file just to build a progress
+// number), so if that file changed since skip was built and ends up
+// archived anyway, the real transfer can exceed this estimate — same
+// caveat any progress bar built on a size estimate lives with (rsync,
+// tar). Uses only os.Lstat, never opens a file, so it stays cheap even
+// for large trees.
+func EstimateSendSize(root string, skip map[string]string) (int64, error) {
+	root = filepath.Clean(root)
+	baseInfo, err := os.Lstat(root)
+	if err != nil {
+		return 0, fmt.Errorf("pipeline: stat %s: %w", root, err)
+	}
+
+	if !baseInfo.IsDir() {
+		if baseInfo.Mode()&os.ModeSymlink != 0 {
+			return 0, nil
+		}
+		if _, skipped := skip[filepath.Base(root)]; skipped {
+			return 0, nil
+		}
+		return baseInfo.Size(), nil
+	}
+
+	var total int64
+	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		if rel == "." || d.IsDir() {
+			return nil
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if _, skipped := skip[filepath.ToSlash(rel)]; skipped {
+			return nil
+		}
+		total += info.Size()
+		return nil
+	})
+	if walkErr != nil {
+		return 0, fmt.Errorf("pipeline: estimate size of %s: %w", root, walkErr)
+	}
+	return total, nil
+}
+
 // fileMatchesHash reports whether absPath's current content hashes to
 // wantHash (hex sha256), streaming the file rather than buffering it.
 func fileMatchesHash(absPath, wantHash string) (bool, error) {

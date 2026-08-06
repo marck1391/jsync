@@ -6,6 +6,8 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
+	"sync/atomic"
+	"time"
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -17,15 +19,33 @@ import (
 	fsnats "filesharer/internal/transport/nats"
 )
 
-// Status is the payload published to fileshare.status.<session_id> once a
-// Fase 2 receive finishes (Fase 2 §5's status channel — today just the one
-// done/failed signal this function sends, not the per-chunk progress
-// feed that section also describes; that's a documented gap, not an
-// oversight, see Fase 2 for the plan).
+// progressPublishInterval throttles how often ReceiveSession publishes an
+// intermediate Status while a transfer is in flight — time-based, not
+// per-file, so a tree of many small files doesn't flood
+// fileshare.status.<session_id> and a tree of a few huge files still
+// reports something before the very end. A var, not a const, so a test can
+// shrink it to force a deterministic progress ping instead of a real
+// transfer needing to run past 500ms — same technique diskfull.go's
+// isDiskFull uses for the same reason.
+var progressPublishInterval = 500 * time.Millisecond
+
+// Status is the payload published to fileshare.status.<session_id> — most
+// messages during a transfer are progress pings (Final: false), and
+// exactly one is the terminal message (Final: true) that ends it, success
+// or failure (Fase 2 §5's status channel).
 type Status struct {
 	SessionID string `json:"session_id"`
-	Completed bool   `json:"completed"`
+	Completed bool   `json:"completed"` // only meaningful when Final is true
 	Error     string `json:"error,omitempty"`
+	Final     bool   `json:"final"`
+
+	// BytesReceived/TotalBytes ride both progress pings and the final
+	// message. TotalBytes is EstimateSendSize's upfront (uncompressed,
+	// approximate) estimate — 0 means unknown (an older sender, or the
+	// estimate failed), in which case a consumer should show bytes
+	// received without a percentage rather than dividing by zero.
+	BytesReceived int64 `json:"bytes_received,omitempty"`
+	TotalBytes    int64 `json:"total_bytes,omitempty"`
 }
 
 // ReceiveSession runs the Fase 2 receiving side for one approved handshake
@@ -48,11 +68,11 @@ type Status struct {
 // Data the sender authenticated each chunk against.
 func ReceiveSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStream, sess *handshake.Session, prekeys *x3dh.Store, localIdentityPub ed25519.PublicKey, resumes *ResumeRegistry) error {
 	if _, err := fsnats.EnsureStream(ctx, js, sess.ID); err != nil {
-		return publishStatus(conn, sess.ID, fmt.Errorf("ensure stream: %w", err))
+		return publishFinalStatus(conn, sess.ID, 0, 0, fmt.Errorf("ensure stream: %w", err))
 	}
 	consumer, err := fsnats.EnsureStreamConsumer(ctx, js, sess.ID)
 	if err != nil {
-		return publishStatus(conn, sess.ID, fmt.Errorf("ensure consumer: %w", err))
+		return publishFinalStatus(conn, sess.ID, 0, 0, fmt.Errorf("ensure consumer: %w", err))
 	}
 
 	associatedData := x3dh.AssociatedData(sess.PeerPublicKey, localIdentityPub)
@@ -65,9 +85,53 @@ func ReceiveSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStre
 		sandboxDir = pipeline.SandboxPath(sess.DestPath, sess.ID)
 		completed = map[string]string{}
 	}
-	onFileComplete := func(relPath, hash string) { completed[relPath] = hash }
 
-	pr, recvDone := pipeline.ReceiveArchive(ctx, consumer, associatedData, deriveChain)
+	// totalBytes/bytesReceived are set from two different goroutines —
+	// onTotalBytes fires from ReceiveArchive's own background receive
+	// loop, onFileComplete fires from this goroutine via ExtractArchive —
+	// so both need real synchronization, not just "it happens to run
+	// early enough in practice". lastPublishNano gates the throttle with
+	// a CompareAndSwap rather than a plain check-then-set for the same
+	// reason, even though in practice onFileComplete is the only one that
+	// ever calls publishProgress.
+	var totalBytes atomic.Int64
+	var bytesReceived atomic.Int64
+	var lastPublishNano atomic.Int64
+	// Seeded to "now", not the zero value: an unseeded 0 would make
+	// progressPublishInterval's check trivially true for the very first
+	// file (any real UnixNano timestamp minus 0 is far past the
+	// threshold), publishing a progress ping before a transfer has even
+	// had a chance to be fast — a small/quick transfer (most tests, and
+	// plenty of real ones) would then always emit an extra message before
+	// the final one instead of finishing inside one throttle window.
+	lastPublishNano.Store(time.Now().UnixNano())
+
+	publishProgress := func() {
+		now := time.Now().UnixNano()
+		last := lastPublishNano.Load()
+		if now-last < progressPublishInterval.Nanoseconds() {
+			return
+		}
+		if !lastPublishNano.CompareAndSwap(last, now) {
+			return // another goroutine just published; skip this round
+		}
+		st := Status{
+			SessionID:     sess.ID,
+			Final:         false,
+			BytesReceived: bytesReceived.Load(),
+			TotalBytes:    totalBytes.Load(),
+		}
+		_ = publish(conn, st) // progress pings are best-effort, not worth failing the transfer over
+	}
+
+	onTotalBytes := func(total int64) { totalBytes.Store(total) }
+	onFileComplete := func(relPath, hash string, size int64) {
+		completed[relPath] = hash
+		bytesReceived.Add(size)
+		publishProgress()
+	}
+
+	pr, recvDone := pipeline.ReceiveArchive(ctx, consumer, associatedData, deriveChain, onTotalBytes)
 	// If ExtractArchive below returns early on error without draining pr
 	// to EOF, the goroutine behind ReceiveArchive can be left blocked
 	// forever on a pipe Write with nothing left to read it — pr.Close()
@@ -93,7 +157,7 @@ func ReceiveSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStre
 		} else {
 			resumes.Park(sess.PeerPublicKey, sess.DestPath, sandboxDir, completed, resumeGracePeriod)
 		}
-		return publishStatus(conn, sess.ID, fmt.Errorf("receive/extract: %w", cause))
+		return publishFinalStatus(conn, sess.ID, bytesReceived.Load(), totalBytes.Load(), fmt.Errorf("receive/extract: %w", cause))
 	}
 
 	if err := pipeline.CommitSandbox(sandboxDir, sess.DestPath); err != nil {
@@ -102,23 +166,36 @@ func ReceiveSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStre
 		} else {
 			resumes.Park(sess.PeerPublicKey, sess.DestPath, sandboxDir, completed, resumeGracePeriod)
 		}
-		return publishStatus(conn, sess.ID, fmt.Errorf("commit: %w", err))
+		return publishFinalStatus(conn, sess.ID, bytesReceived.Load(), totalBytes.Load(), fmt.Errorf("commit: %w", err))
 	}
 
-	return publishStatus(conn, sess.ID, nil)
+	return publishFinalStatus(conn, sess.ID, bytesReceived.Load(), totalBytes.Load(), nil)
 }
 
-func publishStatus(conn *natsgo.Conn, sessionID string, cause error) error {
-	st := Status{SessionID: sessionID, Completed: cause == nil}
+func publishFinalStatus(conn *natsgo.Conn, sessionID string, bytesReceived, totalBytes int64, cause error) error {
+	st := Status{
+		SessionID:     sessionID,
+		Completed:     cause == nil,
+		Final:         true,
+		BytesReceived: bytesReceived,
+		TotalBytes:    totalBytes,
+	}
 	if cause != nil {
 		st.Error = cause.Error()
 	}
+	if err := publish(conn, st); err != nil {
+		return err
+	}
+	return cause
+}
+
+func publish(conn *natsgo.Conn, st Status) error {
 	data, err := json.Marshal(st)
 	if err != nil {
 		return fmt.Errorf("daemon: encode status: %w", err)
 	}
-	if pubErr := conn.Publish(fsnats.StatusSubject(sessionID), data); pubErr != nil {
+	if pubErr := conn.Publish(fsnats.StatusSubject(st.SessionID), data); pubErr != nil {
 		return fmt.Errorf("daemon: publish status: %w", pubErr)
 	}
-	return cause
+	return nil
 }

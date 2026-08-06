@@ -410,7 +410,7 @@ func publishOnceStreamExists(ctx context.Context, js jetstream.JetStream, sessio
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	return pipeline.PublishArchive(ctx, js, fsnats.StreamSubject(sessionID), r, pipeline.DefaultChunkSize, enc)
+	return pipeline.PublishArchive(ctx, js, fsnats.StreamSubject(sessionID), r, pipeline.DefaultChunkSize, enc, 0)
 }
 
 func subscribeStatus(t *testing.T, conn *natsgo.Conn, sessionID string) <-chan daemon.Status {
