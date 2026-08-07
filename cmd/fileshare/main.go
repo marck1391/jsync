@@ -452,12 +452,14 @@ const watchBootstrapTimeout = 15 * time.Second
 
 // cmdWatch runs a live, bidirectional Fase 5 sync session: it handshakes
 // with DirectionBidirectional (fileshared's OnApproved starts a matching
-// Watcher on its own side, see cmd/fileshared), then watches localPath and
-// both publishes its own changes and applies the peer's, until interrupted
-// (Ctrl+C / SIGTERM). With --encrypt, every event is end-to-end encrypted
-// via Fase 3's X3DH + Double Ratchet before any of that starts — see
-// buildWatchEncryption. There is still no initial reconciliation: it only
-// reacts to changes from the moment it starts.
+// Watcher on its own side, see cmd/fileshared), runs Fase 5 §1's initial
+// reconciliation against the peer (syncfs.Reconcile) so anything either
+// side changed while disconnected converges before anything else happens,
+// then watches localPath and both publishes its own changes and applies
+// the peer's, until interrupted (Ctrl+C / SIGTERM). With --encrypt, every
+// event — reconciliation's included — is end-to-end encrypted via Fase 3's
+// X3DH + Double Ratchet before any of that starts — see
+// buildWatchEncryption.
 func cmdWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	cfgPath := fs.String("config", "config.yaml", "path to daemon config file")
@@ -541,6 +543,23 @@ func cmdWatch(args []string) error {
 	if err != nil {
 		return fmt.Errorf("load %s: %w", ignore.FileName, err)
 	}
+
+	echo := syncfs.NewEchoGuard()
+	versions := syncfs.NewVersionStore()
+
+	onConflict := func(ev syncfs.Event, conflictPath string) {
+		fmt.Fprintf(os.Stderr, "fileshare watch: conflict on %s, wrote %s — resolve manually\n", ev.RelPath, conflictPath)
+	}
+
+	// Fase 5 §1: converge with whatever targetMachineID's side already has
+	// before either side's live Watcher starts — otherwise changes made
+	// while disconnected (or a first sync between two non-empty
+	// directories) would never propagate, only changes from this point on.
+	fmt.Println("reconciling with", targetMachineID+"...")
+	if err := syncfs.Reconcile(ctx, js, cons, subject, id.MachineID, targetMachineID, localPath, matcher, versions, echo, onConflict, enc); err != nil {
+		return fmt.Errorf("initial reconciliation with %s: %w", targetMachineID, err)
+	}
+
 	fw := watch.NewFileWatcher(watch.DefaultDebounce, watch.DefaultBufferSize, matcher)
 	changes, watchErrs := fw.Watch(ctx, localPath)
 	defer fw.Close()
@@ -549,13 +568,6 @@ func cmdWatch(args []string) error {
 			fmt.Fprintln(os.Stderr, "fileshare watch: local watch error:", werr)
 		}
 	}()
-
-	echo := syncfs.NewEchoGuard()
-	versions := syncfs.NewVersionStore()
-
-	onConflict := func(ev syncfs.Event, conflictPath string) {
-		fmt.Fprintf(os.Stderr, "fileshare watch: conflict on %s, wrote %s — resolve manually\n", ev.RelPath, conflictPath)
-	}
 
 	errCh := make(chan error, 2)
 	go func() {

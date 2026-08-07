@@ -28,6 +28,14 @@ const (
 	// decrypting. See encrypt.go.
 	OpBootstrap    Op = "bootstrap"
 	OpBootstrapAck Op = "bootstrap_ack"
+
+	// OpManifest and OpReconcileDone are control messages for Fase 5 §1's
+	// initial reconciliation (reconcile.go) — like OpBootstrap/OpBootstrapAck,
+	// Apply never sees them. OpManifest carries one side's complete file
+	// inventory; OpReconcileDone tells the peer this node has pushed
+	// everything its half of the diff required.
+	OpManifest      Op = "manifest"
+	OpReconcileDone Op = "reconcile_done"
 )
 
 // Event is one filesystem mutation propagated between two Watcher sessions
@@ -67,6 +75,10 @@ type Event struct {
 	BootstrapInitiatorDHPub []byte `json:"bootstrap_initiator_dh_pub,omitempty"` // OpBootstrap only
 	BootstrapEphemeralPub   []byte `json:"bootstrap_ephemeral_pub,omitempty"`    // OpBootstrap and OpBootstrapAck
 	BootstrapUsedOTPID      uint32 `json:"bootstrap_used_otp_id,omitempty"`      // OpBootstrap only
+
+	// ReconcileManifest carries the publishing node's complete file
+	// inventory (reconcile.go) — set only for OpManifest.
+	ReconcileManifest Manifest `json:"reconcile_manifest,omitempty"`
 }
 
 // ContentHash returns the hex-encoded SHA-256 of data — the currency

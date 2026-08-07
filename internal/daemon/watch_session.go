@@ -31,12 +31,14 @@ const bootstrapTimeout = 15 * time.Second
 
 // WatchSession runs the Fase 5 receiving side for one approved bidirectional
 // handshake session: creates the session's events stream and this node's
-// own durable consumer on it, starts a native Watcher on sess.DestPath, and
-// bridges both directions (its own local changes out, the peer's changes
-// in) exactly the way cmd/fileshare's `watch` does on the initiator's side
-// — the Watcher session is symmetric, neither end is privileged. Runs
-// until ctx is done (the Daemon shutting down) or an unrecoverable error;
-// unlike ReceiveSession there is no natural "done" point for a live sync.
+// own durable consumer on it, runs Fase 5 §1's initial reconciliation
+// against the peer (syncfs.Reconcile), starts a native Watcher on
+// sess.DestPath, and bridges both directions (its own local changes out,
+// the peer's changes in) exactly the way cmd/fileshare's `watch` does on
+// the initiator's side — the Watcher session is symmetric, neither end is
+// privileged. Runs until ctx is done (the Daemon shutting down) or an
+// unrecoverable error; unlike ReceiveSession there is no natural "done"
+// point for a live sync.
 //
 // prekeys is this node's own X3DH material, used only if sess.Params.Encrypt
 // (the initiator asked for --encrypt); localIdentityPub is this node's
@@ -73,6 +75,22 @@ func WatchSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStream
 	if err != nil {
 		return fmt.Errorf("daemon: load %s: %w", ignore.FileName, err)
 	}
+
+	echo := syncfs.NewEchoGuard()
+	versions := syncfs.NewVersionStore()
+
+	onConflict := func(ev syncfs.Event, conflictPath string) {
+		fmt.Fprintf(os.Stderr, "fileshared: watch session %s: conflict on %s, wrote %s — resolve manually\n", sess.ID, ev.RelPath, conflictPath)
+	}
+
+	// Fase 5 §1: converge with the initiator's side before this node's own
+	// Watcher starts — same call, same position in the startup sequence, as
+	// cmd/fileshare's cmdWatch (neither end of a Watcher session is
+	// privileged, see the package doc above).
+	if err := syncfs.Reconcile(ctx, js, cons, subject, localMachineID, sess.PeerMachineID, sess.DestPath, matcher, versions, echo, onConflict, enc); err != nil {
+		return fmt.Errorf("daemon: watch session %s: initial reconciliation: %w", sess.ID, err)
+	}
+
 	fw := watch.NewFileWatcher(watch.DefaultDebounce, watch.DefaultBufferSize, matcher)
 	defer fw.Close()
 	changes, watchErrs := fw.Watch(ctx, sess.DestPath)
@@ -81,13 +99,6 @@ func WatchSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStream
 			fmt.Fprintf(os.Stderr, "fileshared: watch session %s: local watch error: %v\n", sess.ID, err)
 		}
 	}()
-
-	echo := syncfs.NewEchoGuard()
-	versions := syncfs.NewVersionStore()
-
-	onConflict := func(ev syncfs.Event, conflictPath string) {
-		fmt.Fprintf(os.Stderr, "fileshared: watch session %s: conflict on %s, wrote %s — resolve manually\n", sess.ID, ev.RelPath, conflictPath)
-	}
 
 	errCh := make(chan error, 2)
 	go func() {

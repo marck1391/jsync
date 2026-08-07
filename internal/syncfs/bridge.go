@@ -59,10 +59,13 @@ func PublishChanges(ctx context.Context, js jetstream.JetStream, subject, machin
 func publishOne(ctx context.Context, js jetstream.JetStream, subject, machineID, root string, cev watch.ChangeEvent, echo *EchoGuard, versions *VersionStore, enc *Encryption) error {
 	switch cev.Kind {
 	case watch.ChangeRescan:
-		// Fase 5's initial-reconciliation story isn't implemented yet (see
-		// Notas de Implementación) — there's no well-defined "resync"
-		// message to send for this today, so it's dropped rather than
-		// guessed at.
+		// Reconcile (reconcile.go) now exists, but only as a one-shot run
+		// before the live loop starts — re-running it mid-session from here
+		// would need to pause ReceiveChanges' own Fetch on the same cons
+		// (Reconcile's drain loop reads from it too) and coordinate with
+		// versions/echo while they're in concurrent use, which is real
+		// added complexity, not a small follow-up. Still dropped rather
+		// than guessed at — see Fase 5's Notas de Implementación.
 		return nil
 
 	case watch.ChangeModified:
@@ -106,6 +109,45 @@ func publishOne(ctx context.Context, js jetstream.JetStream, subject, machineID,
 		// echo. That's what keeps this the zero-byte-transfer path Fase 5
 		// wants — no need to read and hash the file's content first.
 		return publish(ctx, js, subject, Event{Origin: machineID, Op: OpRename, RelPath: cev.RelPath, OldRelPath: cev.OldRelPath})
+	}
+	return nil
+}
+
+// applyEvent classifies and applies one already-decrypted-if-needed,
+// already-Origin-filtered mutation event: OpWrite goes through
+// VersionStore.Reconcile before Apply/ApplyConflict (Fase 5 §2); OpRemove
+// and OpRename apply unconditionally (not version-vector-tracked yet — see
+// the package doc above). Marks echo on a clean apply so this node's own
+// Watcher, once it starts, recognizes the result instead of re-publishing
+// it. Shared between ReceiveChanges' live loop and Reconcile's initial
+// drain (reconcile.go) — the two differ only in when they stop looping and
+// how they source events, not in how a single event is applied.
+func applyEvent(ev Event, destRoot string, echo *EchoGuard, versions *VersionStore, onConflict func(ev Event, conflictPath string)) error {
+	if ev.Op == OpWrite {
+		safe, conflict := versions.Reconcile(ev.RelPath, ev.Version)
+		if conflict {
+			conflictPath, err := ApplyConflict(ev, destRoot)
+			if err != nil {
+				return fmt.Errorf("syncfs: write conflict file for %s: %w", ev.RelPath, err)
+			}
+			if onConflict != nil {
+				onConflict(ev, conflictPath)
+			}
+			return nil
+		}
+		if !safe {
+			return nil // stale: a re-delivery, or an update already causally superseded — nothing to apply
+		}
+	}
+
+	if err := Apply(ev, destRoot); err != nil {
+		return fmt.Errorf("syncfs: apply %s %s: %w", ev.Op, ev.RelPath, err)
+	}
+	switch ev.Op {
+	case OpWrite:
+		echo.MarkApplied(ev.RelPath, ev.ContentHash)
+	case OpRemove:
+		echo.MarkRemoved(ev.RelPath)
 	}
 	return nil
 }
@@ -178,15 +220,15 @@ func ReceiveChanges(ctx context.Context, cons jetstream.Consumer, machineID, des
 				continue
 			}
 
-			// Decrypted unconditionally, before Reconcile/conflict/stale
-			// short-circuit below: enc.RecvChain's counter must advance
-			// exactly once for every OpWrite the peer actually published,
-			// regardless of what this node then does with the result. A
-			// stale/conflict message never applied is still one the peer's
-			// SendChain spent a sequence number on — skipping Decrypt here
-			// for such a message would desync this chain from the peer's
-			// forever, breaking every OpWrite for the rest of the session
-			// with an opaque GCM authentication failure.
+			// Decrypted unconditionally, before applyEvent's Reconcile/
+			// conflict/stale short-circuit: enc.RecvChain's counter must
+			// advance exactly once for every OpWrite the peer actually
+			// published, regardless of what this node then does with the
+			// result. A stale/conflict message never applied is still one
+			// the peer's SendChain spent a sequence number on — skipping
+			// Decrypt here for such a message would desync this chain from
+			// the peer's forever, breaking every OpWrite for the rest of
+			// the session with an opaque GCM authentication failure.
 			if enc != nil && ev.Op == OpWrite {
 				plaintext, err := enc.RecvChain.Decrypt(ev.Data, enc.AssociatedData, ev.Seq)
 				if err != nil {
@@ -196,42 +238,9 @@ func ReceiveChanges(ctx context.Context, cons jetstream.Consumer, machineID, des
 				ev.Data = plaintext
 			}
 
-			if ev.Op == OpWrite {
-				safe, conflict := versions.Reconcile(ev.RelPath, ev.Version)
-				if conflict {
-					conflictPath, cErr := ApplyConflict(ev, destRoot)
-					if cErr != nil {
-						_ = msg.Nak()
-						return fmt.Errorf("syncfs: write conflict file for %s: %w", ev.RelPath, cErr)
-					}
-					if onConflict != nil {
-						onConflict(ev, conflictPath)
-					}
-					if err := msg.Ack(); err != nil {
-						return fmt.Errorf("syncfs: ack event: %w", err)
-					}
-					continue
-				}
-				if !safe {
-					// Stale: a re-delivery or an update we've already
-					// causally seen a newer version of. Ack and move on —
-					// nothing to apply, and it's not an error.
-					if err := msg.Ack(); err != nil {
-						return fmt.Errorf("syncfs: ack event: %w", err)
-					}
-					continue
-				}
-			}
-
-			if err := Apply(ev, destRoot); err != nil {
+			if err := applyEvent(ev, destRoot, echo, versions, onConflict); err != nil {
 				_ = msg.Nak()
-				return fmt.Errorf("syncfs: apply %s %s: %w", ev.Op, ev.RelPath, err)
-			}
-			switch ev.Op {
-			case OpWrite:
-				echo.MarkApplied(ev.RelPath, ev.ContentHash)
-			case OpRemove:
-				echo.MarkRemoved(ev.RelPath)
+				return err
 			}
 			if err := msg.Ack(); err != nil {
 				return fmt.Errorf("syncfs: ack event: %w", err)
