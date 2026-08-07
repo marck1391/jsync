@@ -92,14 +92,14 @@ func ContentHash(data []byte) string {
 
 // Apply mirrors ev onto destRoot (Fase 5 §"Flujo de Reproducción en el
 // Daemon"). OpWrite writes directly to the target path (O_CREATE|O_TRUNC),
-// deliberately not via a temp-file-then-rename: Apply must never itself
-// trigger a rename on the local filesystem, because publishOne (event.go)
-// treats every observed ChangeRenamed as genuine and always propagates it
-// — if Apply used temp+rename to "commit" a write, its own local Watcher
-// would see that rename and re-publish it, breaking the echo-loop guard
-// this whole package exists to provide. The atomicity this trades away
-// (a reader could observe a partially-written file mid-Apply) is a
-// documented gap, not an oversight — see Fase 5's Notas de Implementación.
+// deliberately not via a temp-file-then-rename: an OpWrite-triggered rename
+// has no corresponding EchoGuard.MarkRenamed entry (only a genuine OpRename
+// Apply gets one — see bridge.go/echo.go), so if Apply used temp+rename to
+// "commit" a write, its own local Watcher would see that rename, find no
+// echo-guard match, and re-publish it as a bogus rename from a temp path
+// the peer never had. The atomicity this trades away (a reader could
+// observe a partially-written file mid-Apply) is a documented gap, not an
+// oversight — see Fase 5's Notas de Implementación.
 func Apply(ev Event, destRoot string) error {
 	switch ev.Op {
 	case OpWrite:

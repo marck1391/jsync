@@ -103,11 +103,17 @@ func publishOne(ctx context.Context, js jetstream.JetStream, subject, machineID,
 		return publish(ctx, js, subject, Event{Origin: machineID, Op: OpRemove, RelPath: cev.RelPath})
 
 	case watch.ChangeRenamed:
-		// No echo check here by design: Apply never performs a rename
-		// (see its doc comment), so a rename this node's own Watcher
-		// reports can only be a genuine local rename, never a self-caused
-		// echo. That's what keeps this the zero-byte-transfer path Fase 5
-		// wants — no need to read and hash the file's content first.
+		// Unlike OpWrite, applyRename really does call os.Rename to mirror
+		// the peer's rename — so this node's own Watcher, once it starts,
+		// genuinely observes a rename it didn't originate. Without this
+		// check that observation would look like a brand-new local rename
+		// and get re-published straight back at the peer, which no longer
+		// has OldRelPath to rename from (it already renamed it away
+		// itself) — the bounced event fails to apply on the peer's side
+		// and aborts the whole session. See EchoGuard.MarkRenamed.
+		if echo.IsEchoRename(cev.OldRelPath, cev.RelPath) {
+			return nil
+		}
 		return publish(ctx, js, subject, Event{Origin: machineID, Op: OpRename, RelPath: cev.RelPath, OldRelPath: cev.OldRelPath})
 	}
 	return nil
@@ -148,6 +154,8 @@ func applyEvent(ev Event, destRoot string, echo *EchoGuard, versions *VersionSto
 		echo.MarkApplied(ev.RelPath, ev.ContentHash)
 	case OpRemove:
 		echo.MarkRemoved(ev.RelPath)
+	case OpRename:
+		echo.MarkRenamed(ev.OldRelPath, ev.RelPath)
 	}
 	return nil
 }

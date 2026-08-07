@@ -2,8 +2,10 @@ package syncfs_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -224,5 +226,109 @@ func TestBidirectionalNoEchoLoop(t *testing.T) {
 	}
 	if string(data) != "from A" {
 		t.Errorf("fileA content = %q, want %q (should be untouched, not bounced back and rewritten)", data, "from A")
+	}
+}
+
+// TestBidirectionalRenameNoBounce reproduces the bug documented in the
+// project CLAUDE.md's "Siguientes pasos" history: unlike Apply's OpWrite
+// path, applyRename really does call os.Rename to mirror the peer's move —
+// so in a genuinely bidirectional session (both nodes watching and
+// syncing, not just one publishing) the receiving node's own Watcher
+// genuinely observes that rename and, without EchoGuard.MarkRenamed, would
+// re-publish it straight back. The peer then tries to apply a rename from
+// a path it already renamed away itself, fails, and the whole session
+// aborts. This drives a real rename through two live, bidirectional nodes
+// and asserts neither side's ReceiveChanges dies.
+func TestBidirectionalRenameNoBounce(t *testing.T) {
+	node := bootstrapTestNode(t)
+	js, err := jetstream.New(node.Conn)
+	if err != nil {
+		t.Fatalf("jetstream.New: %v", err)
+	}
+
+	const sessionID = "sync-bidi-rename"
+	if _, err := fsnats.EnsureEventsStream(context.Background(), js, sessionID); err != nil {
+		t.Fatalf("EnsureEventsStream: %v", err)
+	}
+	subject := fsnats.EventsSubject(sessionID)
+
+	rootA := t.TempDir()
+	rootB := t.TempDir()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	var recvErrs []error
+	recordErr := func(machineID string, err error) {
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		recvErrs = append(recvErrs, fmt.Errorf("[%s] ReceiveChanges: %w", machineID, err))
+	}
+
+	startNode := func(machineID, root string) {
+		fw := watch.NewFileWatcher(30*time.Millisecond, watch.DefaultBufferSize, nil)
+		changes, watchErrs := fw.Watch(ctx, root)
+		t.Cleanup(func() { fw.Close() })
+		go func() {
+			for err := range watchErrs {
+				t.Logf("[%s] watch error: %v", machineID, err)
+			}
+		}()
+
+		echo := syncfs.NewEchoGuard()
+		versions := syncfs.NewVersionStore()
+		go func() {
+			if err := syncfs.PublishChanges(ctx, js, subject, machineID, root, changes, echo, versions, nil); err != nil && ctx.Err() == nil {
+				t.Logf("[%s] PublishChanges: %v", machineID, err)
+			}
+		}()
+
+		cons, err := fsnats.EnsureEventsConsumer(context.Background(), js, sessionID, machineID)
+		if err != nil {
+			t.Fatalf("[%s] EnsureEventsConsumer: %v", machineID, err)
+		}
+		go func() {
+			recordErr(machineID, syncfs.ReceiveChanges(ctx, cons, machineID, root, echo, versions, nil, nil))
+		}()
+	}
+
+	startNode("node-a", rootA)
+	startNode("node-b", rootB)
+
+	original := filepath.Join(rootA, "original.txt")
+	if err := os.WriteFile(original, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write on A: %v", err)
+	}
+	originalOnB := filepath.Join(rootB, "original.txt")
+	waitForContent(t, originalOnB, "hello", 5*time.Second)
+
+	renamed := filepath.Join(rootA, "renamed.txt")
+	if err := os.Rename(original, renamed); err != nil {
+		t.Fatalf("rename on A: %v", err)
+	}
+	renamedOnB := filepath.Join(rootB, "renamed.txt")
+	waitForContent(t, renamedOnB, "hello", 5*time.Second)
+	waitForAbsence(t, originalOnB, 5*time.Second)
+
+	// Give a bounce (were the fix absent) a real chance to happen and kill
+	// a ReceiveChanges goroutine before checking.
+	time.Sleep(1 * time.Second)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(recvErrs) != 0 {
+		t.Fatalf("ReceiveChanges failed (rename bounced back and aborted the session): %v", recvErrs)
+	}
+
+	// Both sides should have settled on the renamed path only.
+	if _, err := os.Stat(renamed); err != nil {
+		t.Errorf("rootA/renamed.txt: %v (should still exist, untouched by any bounce)", err)
+	}
+	if _, err := os.Stat(original); !os.IsNotExist(err) {
+		t.Errorf("rootA/original.txt still exists (or stat errored: %v) — should have stayed renamed away", err)
 	}
 }

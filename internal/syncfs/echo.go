@@ -26,11 +26,12 @@ const removedSentinel = "removed"
 type EchoGuard struct {
 	mu      sync.Mutex
 	entries map[string]string // relPath -> expected content hash, or removedSentinel
+	renamed map[string]string // new relPath -> old relPath, for a rename this node just applied
 }
 
 // NewEchoGuard returns an empty guard.
 func NewEchoGuard() *EchoGuard {
-	return &EchoGuard{entries: map[string]string{}}
+	return &EchoGuard{entries: map[string]string{}, renamed: map[string]string{}}
 }
 
 // MarkApplied records that relPath was just written locally (via Apply)
@@ -73,5 +74,36 @@ func (g *EchoGuard) IsEchoRemove(relPath string) bool {
 		return false
 	}
 	delete(g.entries, relPath)
+	return true
+}
+
+// MarkRenamed records that this node just renamed oldRelPath to newRelPath
+// locally (via Apply), because of an incoming OpRename Event. Unlike
+// OpWrite, applyRename really does call os.Rename — Apply's own doc
+// comment explains why OpWrite deliberately avoids one, but OpRename's
+// whole point is to mirror the peer's rename — so this node's own Watcher,
+// once started, genuinely observes it. Without this guard, publishOne
+// would treat that observation as a brand-new local rename and re-publish
+// it back at the peer, which no longer has oldRelPath to rename from (it
+// already renamed it away itself): the bounced event fails to apply and
+// aborts the whole session. Found writing internal/syncfs's bidirectional
+// tests — see the project CLAUDE.md's "Siguientes pasos" history.
+func (g *EchoGuard) MarkRenamed(oldRelPath, newRelPath string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.renamed[newRelPath] = oldRelPath
+}
+
+// IsEchoRename reports whether a locally observed rename from oldRelPath to
+// newRelPath matches a MarkRenamed recorded for that exact pair, consuming
+// the entry if so.
+func (g *EchoGuard) IsEchoRename(oldRelPath, newRelPath string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	want, ok := g.renamed[newRelPath]
+	if !ok || want != oldRelPath {
+		return false
+	}
+	delete(g.renamed, newRelPath)
 	return true
 }
