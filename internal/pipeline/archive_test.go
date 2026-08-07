@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -33,7 +34,7 @@ func TestNewArchiveReaderDirectory(t *testing.T) {
 	root := t.TempDir()
 	writeTestTree(t, root)
 
-	ar := NewArchiveReader(root, nil)
+	ar := NewArchiveReader(root, nil, nil)
 	defer ar.Close()
 
 	gz, err := gzip.NewReader(ar)
@@ -122,7 +123,7 @@ func TestNewArchiveReaderSkipsMatchingFile(t *testing.T) {
 
 	skip := map[string]string{"a.txt": hashOf("hello from a")}
 
-	ar := NewArchiveReader(root, skip)
+	ar := NewArchiveReader(root, skip, nil)
 	defer ar.Close()
 	got := readTarEntries(t, ar)
 
@@ -147,7 +148,7 @@ func TestNewArchiveReaderResendsChangedFile(t *testing.T) {
 
 	skip := map[string]string{"a.txt": hashOf("this is not a.txt's real content")}
 
-	ar := NewArchiveReader(root, skip)
+	ar := NewArchiveReader(root, skip, nil)
 	defer ar.Close()
 	got := readTarEntries(t, ar)
 
@@ -161,7 +162,7 @@ func TestEstimateSendSizeSumsAllFiles(t *testing.T) {
 	writeTestTree(t, root)
 
 	want := int64(len("hello from a") + len("hello from b") + len("hello from c, nested deeper"))
-	got, err := EstimateSendSize(root, nil)
+	got, err := EstimateSendSize(root, nil, nil)
 	if err != nil {
 		t.Fatalf("EstimateSendSize: %v", err)
 	}
@@ -178,7 +179,7 @@ func TestEstimateSendSizeExcludesSkippedFiles(t *testing.T) {
 	// presence, it doesn't re-hash) — should be excluded from the total.
 	skip := map[string]string{"a.txt": "irrelevant-for-this-check"}
 	want := int64(len("hello from b") + len("hello from c, nested deeper"))
-	got, err := EstimateSendSize(root, skip)
+	got, err := EstimateSendSize(root, skip, nil)
 	if err != nil {
 		t.Fatalf("EstimateSendSize: %v", err)
 	}
@@ -194,7 +195,7 @@ func TestEstimateSendSizeSingleFile(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	got, err := EstimateSendSize(filePath, nil)
+	got, err := EstimateSendSize(filePath, nil, nil)
 	if err != nil {
 		t.Fatalf("EstimateSendSize: %v", err)
 	}
@@ -218,7 +219,7 @@ func TestNewArchiveReaderEmitsRealSymlinkEntry(t *testing.T) {
 		t.Fatalf("setup symlink: %v", err)
 	}
 
-	ar := NewArchiveReader(root, nil)
+	ar := NewArchiveReader(root, nil, nil)
 	defer ar.Close()
 
 	gz, err := gzip.NewReader(ar)
@@ -260,7 +261,7 @@ func TestNewArchiveReaderSingleFile(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	ar := NewArchiveReader(filePath, nil)
+	ar := NewArchiveReader(filePath, nil, nil)
 	defer ar.Close()
 
 	gz, err := gzip.NewReader(ar)
@@ -286,5 +287,80 @@ func TestNewArchiveReaderSingleFile(t *testing.T) {
 
 	if _, err := tr.Next(); err != io.EOF {
 		t.Errorf("expected exactly one entry, got another (or a non-EOF error %v)", err)
+	}
+}
+
+// prefixMatcher is a minimal PathMatcher stub: matches any relPath under
+// (or exactly equal to) one of the given prefixes, gitignore-directory-
+// pattern style. Enough to exercise NewArchiveReader/EstimateSendSize's
+// exclusion without pulling in internal/ignore's real gitignore parser.
+type prefixMatcher []string
+
+func (m prefixMatcher) Match(relPath string) bool {
+	for _, prefix := range m {
+		if relPath == prefix || strings.HasPrefix(relPath, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestNewArchiveReaderExcludesMatchedPaths confirms a non-nil matcher
+// keeps a whole excluded subtree out of the archive entirely — not just
+// filtered after the fact, but never descended into (mirrors
+// internal/watch's own exclusion, and matters in practice for something
+// like .fileshare/ holding private key material: it must never be walked,
+// not merely have its content dropped after being read).
+func TestNewArchiveReaderExcludesMatchedPaths(t *testing.T) {
+	root := t.TempDir()
+	writeTestTree(t, root)
+	if err := os.MkdirAll(filepath.Join(root, ".fileshare"), 0o755); err != nil {
+		t.Fatalf("setup mkdir .fileshare: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".fileshare", "identity.json"), []byte("private key material"), 0o644); err != nil {
+		t.Fatalf("setup write .fileshare/identity.json: %v", err)
+	}
+
+	ar := NewArchiveReader(root, nil, prefixMatcher{".fileshare"})
+	defer ar.Close()
+
+	got := readTarEntries(t, ar)
+	if _, excluded := got[".fileshare/identity.json"]; excluded {
+		t.Error(".fileshare/identity.json was archived, want it excluded by matcher")
+	}
+	want := map[string]string{
+		"a.txt":            "hello from a",
+		"sub/b.txt":        "hello from b",
+		"sub/deeper/c.txt": "hello from c, nested deeper",
+	}
+	for name, content := range want {
+		if got[name] != content {
+			t.Errorf("entry %s = %q, want %q (non-excluded files must still archive normally)", name, got[name], content)
+		}
+	}
+}
+
+// TestEstimateSendSizeExcludesMatchedPaths mirrors the above for the size
+// estimate — an excluded file must not inflate the progress bar's total.
+func TestEstimateSendSizeExcludesMatchedPaths(t *testing.T) {
+	root := t.TempDir()
+	writeTestTree(t, root) // a.txt(12) + sub/b.txt(12) + sub/deeper/c.txt(27) = 51 bytes
+	if err := os.MkdirAll(filepath.Join(root, ".fileshare"), 0o755); err != nil {
+		t.Fatalf("setup mkdir .fileshare: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".fileshare", "identity.json"), []byte("this should not be counted"), 0o644); err != nil {
+		t.Fatalf("setup write .fileshare/identity.json: %v", err)
+	}
+
+	withMatcher, err := EstimateSendSize(root, nil, prefixMatcher{".fileshare"})
+	if err != nil {
+		t.Fatalf("EstimateSendSize with matcher: %v", err)
+	}
+	withoutMatcher, err := EstimateSendSize(root, nil, nil)
+	if err != nil {
+		t.Fatalf("EstimateSendSize without matcher: %v", err)
+	}
+	if withMatcher != withoutMatcher-int64(len("this should not be counted")) {
+		t.Errorf("EstimateSendSize with matcher = %d, want %d (without matcher %d minus the excluded file's size)", withMatcher, withoutMatcher-int64(len("this should not be counted")), withoutMatcher)
 	}
 }

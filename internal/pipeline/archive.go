@@ -12,6 +12,18 @@ import (
 	"path/filepath"
 )
 
+// PathMatcher decides whether a root-relative, slash-separated path should
+// be excluded from a share transfer. internal/ignore.Matcher satisfies
+// this by structural typing — this package deliberately doesn't import
+// internal/ignore directly, same decoupling internal/watch.PathMatcher
+// already uses (see its doc comment). nil means "no exclusion" — every
+// production caller (cmd/fileshare's cmdShare) passes a real
+// internal/ignore.Matcher; nil exists mainly so tests that don't care
+// about exclusion don't need to construct one.
+type PathMatcher interface {
+	Match(relPath string) bool
+}
+
 // NewArchiveReader walks root and streams it out as a tar.gz over the
 // returned io.ReadCloser. The walk and compression happen in a background
 // goroutine feeding an io.Pipe, so nothing here ever buffers a whole file
@@ -30,17 +42,24 @@ import (
 // only ever omits a file it can positively confirm is already correct on
 // the other end.
 //
+// matcher, if non-nil, excludes any root-relative path it matches — the
+// same internal/ignore.Matcher (DefaultPatterns + .fileshareignore) a
+// Fase 5 watch session already applies. Fase 2's share had no exclusion at
+// all before this: it walked and sent everything, including a
+// config.yaml/identity.json/prekeys.json that happened to live inside the
+// shared root. Pass nil to keep the old everything-included behavior.
+//
 // Close the returned reader once done with it (directly, or by draining it
 // to EOF); either releases the background goroutine.
-func NewArchiveReader(root string, skip map[string]string) io.ReadCloser {
+func NewArchiveReader(root string, skip map[string]string, matcher PathMatcher) io.ReadCloser {
 	pr, pw := io.Pipe()
 	go func() {
-		pw.CloseWithError(writeArchive(pw, root, skip))
+		pw.CloseWithError(writeArchive(pw, root, skip, matcher))
 	}()
 	return pr
 }
 
-func writeArchive(w io.Writer, root string, skip map[string]string) error {
+func writeArchive(w io.Writer, root string, skip map[string]string, matcher PathMatcher) error {
 	root = filepath.Clean(root)
 	baseInfo, err := os.Lstat(root)
 	if err != nil {
@@ -50,7 +69,7 @@ func writeArchive(w io.Writer, root string, skip map[string]string) error {
 	gz := gzip.NewWriter(w)
 	tw := tar.NewWriter(gz)
 
-	walkErr := walkAndAdd(tw, root, baseInfo, skip)
+	walkErr := walkAndAdd(tw, root, baseInfo, skip, matcher)
 	if walkErr != nil {
 		// Best-effort close so a partial stream still ends in something
 		// gzip/tar readers recognize as "truncated" rather than hanging the
@@ -66,8 +85,11 @@ func writeArchive(w io.Writer, root string, skip map[string]string) error {
 	return gz.Close()
 }
 
-func walkAndAdd(tw *tar.Writer, root string, baseInfo fs.FileInfo, skip map[string]string) error {
+func walkAndAdd(tw *tar.Writer, root string, baseInfo fs.FileInfo, skip map[string]string, matcher PathMatcher) error {
 	if !baseInfo.IsDir() {
+		if matcher != nil && matcher.Match(filepath.Base(root)) {
+			return nil
+		}
 		return addFileToTar(tw, root, filepath.Base(root), baseInfo, skip)
 	}
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -81,11 +103,18 @@ func walkAndAdd(tw *tar.Writer, root string, baseInfo fs.FileInfo, skip map[stri
 		if rel == "." {
 			return nil
 		}
+		rel = filepath.ToSlash(rel)
+		if matcher != nil && matcher.Match(rel) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		info, infoErr := d.Info()
 		if infoErr != nil {
 			return infoErr
 		}
-		return addFileToTar(tw, path, filepath.ToSlash(rel), info, skip)
+		return addFileToTar(tw, path, rel, info, skip)
 	})
 }
 
@@ -176,8 +205,9 @@ func addSymlinkToTar(tw *tar.Writer, absPath, relPath string, info fs.FileInfo) 
 // archived anyway, the real transfer can exceed this estimate — same
 // caveat any progress bar built on a size estimate lives with (rsync,
 // tar). Uses only os.Lstat, never opens a file, so it stays cheap even
-// for large trees.
-func EstimateSendSize(root string, skip map[string]string) (int64, error) {
+// for large trees. matcher has the same meaning as NewArchiveReader's —
+// pass the same one to both calls for a consistent estimate vs. actual.
+func EstimateSendSize(root string, skip map[string]string, matcher PathMatcher) (int64, error) {
 	root = filepath.Clean(root)
 	baseInfo, err := os.Lstat(root)
 	if err != nil {
@@ -186,6 +216,9 @@ func EstimateSendSize(root string, skip map[string]string) (int64, error) {
 
 	if !baseInfo.IsDir() {
 		if baseInfo.Mode()&os.ModeSymlink != 0 {
+			return 0, nil
+		}
+		if matcher != nil && matcher.Match(filepath.Base(root)) {
 			return 0, nil
 		}
 		if _, skipped := skip[filepath.Base(root)]; skipped {
@@ -203,7 +236,17 @@ func EstimateSendSize(root string, skip map[string]string) (int64, error) {
 		if relErr != nil {
 			return relErr
 		}
-		if rel == "." || d.IsDir() {
+		if rel == "." {
+			return nil
+		}
+		rel = filepath.ToSlash(rel)
+		if matcher != nil && matcher.Match(rel) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
 			return nil
 		}
 		info, infoErr := d.Info()
@@ -213,7 +256,7 @@ func EstimateSendSize(root string, skip map[string]string) (int64, error) {
 		if info.Mode()&os.ModeSymlink != 0 {
 			return nil
 		}
-		if _, skipped := skip[filepath.ToSlash(rel)]; skipped {
+		if _, skipped := skip[rel]; skipped {
 			return nil
 		}
 		total += info.Size()

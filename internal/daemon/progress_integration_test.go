@@ -101,7 +101,7 @@ func TestReceiveSessionPublishesProgressThenFinalStatus(t *testing.T) {
 
 	sendDone := make(chan error, 1)
 	go func() {
-		ar := pipeline.NewArchiveReader(srcRoot, nil)
+		ar := pipeline.NewArchiveReader(srcRoot, nil, nil)
 		defer ar.Close()
 		// Races ReceiveSession's own EnsureStream on purpose, mirroring
 		// how the real Daemon and CLI run as separate processes (see

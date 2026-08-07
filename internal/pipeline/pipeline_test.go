@@ -58,7 +58,7 @@ func TestSendReceiveCommitRoundTrip(t *testing.T) {
 
 	sendErrCh := make(chan error, 1)
 	go func() {
-		ar := pipeline.NewArchiveReader(srcRoot, nil)
+		ar := pipeline.NewArchiveReader(srcRoot, nil, nil)
 		defer ar.Close()
 		sendErrCh <- pipeline.PublishArchive(ctx, js, subject, ar, smallChunkSize, nil, 0)
 	}()
@@ -178,7 +178,7 @@ func TestSendReceiveCommitRoundTripEncrypted(t *testing.T) {
 
 	sendErrCh := make(chan error, 1)
 	go func() {
-		ar := pipeline.NewArchiveReader(srcRoot, nil)
+		ar := pipeline.NewArchiveReader(srcRoot, nil, nil)
 		defer ar.Close()
 		sendErrCh <- pipeline.PublishArchive(ctx, js, subject, ar, smallChunkSize, enc, 0)
 	}()

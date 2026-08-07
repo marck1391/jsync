@@ -55,8 +55,8 @@ debug: true
 		t.Error("Debug = false, want true")
 	}
 	// Untouched fields must keep their defaults.
-	if cfg.IdentityPath != "identity.json" {
-		t.Errorf("IdentityPath = %q, want default %q", cfg.IdentityPath, "identity.json")
+	if cfg.IdentityPath != ".fileshare/identity.json" {
+		t.Errorf("IdentityPath = %q, want default %q", cfg.IdentityPath, ".fileshare/identity.json")
 	}
 }
 

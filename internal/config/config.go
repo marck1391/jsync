@@ -41,17 +41,28 @@ type Config struct {
 	Debug bool `yaml:"debug"`
 }
 
+// configDir is where every default path below lives: a single, predictable
+// subdirectory for everything the daemon owns (identity, prekeys, the
+// authorized-clients list, JetStream's own storage) — never a bare
+// filename in the current directory. internal/ignore.DefaultPatterns
+// excludes ".fileshare/" unconditionally, so if these defaults are ever
+// left inside a directory that also happens to be a `share`/`watch` root,
+// the private key material in identity.json/prekeys.json doesn't get
+// transferred to a peer just because it was sitting nearby — see the
+// project CLAUDE.md for why this convention exists.
+const configDir = ".fileshare"
+
 func defaults() Config {
 	return Config{
 		Role:                  RoleHub,
-		IdentityPath:          "identity.json",
-		AuthorizedClientsPath: "authorized_clients",
-		PrekeysPath:           "prekeys.json",
+		IdentityPath:          configDir + "/identity.json",
+		AuthorizedClientsPath: configDir + "/authorized_clients",
+		PrekeysPath:           configDir + "/prekeys.json",
 		OneTimePreKeyCount:    10,
 		Host:                  "127.0.0.1",
 		Port:                  4222,
 		LeafNodePort:          7422,
-		JetStreamStoreDir:     "data/jetstream",
+		JetStreamStoreDir:     configDir + "/data/jetstream",
 		MaxPayloadBytes:       1 << 20,
 	}
 }

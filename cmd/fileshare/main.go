@@ -390,12 +390,22 @@ func shareAttempt(conn *natsgo.Conn, js jetstream.JetStream, cfg *config.Config,
 		fmt.Printf("resuming: %s already has %d file(s) from a previous attempt, skipping any that haven't changed\n", targetMachineID, len(skip))
 	}
 
-	totalBytes, err := pipeline.EstimateSendSize(srcPath, skip)
+	// Fase 2's share had no exclusion at all before this — it walked and
+	// sent everything, including a config.yaml/identity.json/prekeys.json
+	// that happened to live inside srcPath. Same matcher watch already
+	// applies: DefaultPatterns (now including .fileshare/, see
+	// internal/ignore) plus any .fileshareignore at srcPath's root.
+	matcher, err := ignore.Load(srcPath)
+	if err != nil {
+		return fmt.Errorf("load %s: %w", ignore.FileName, err)
+	}
+
+	totalBytes, err := pipeline.EstimateSendSize(srcPath, skip, matcher)
 	if err != nil {
 		return fmt.Errorf("estimate size of %s: %w", srcPath, err)
 	}
 
-	ar := pipeline.NewArchiveReader(srcPath, skip)
+	ar := pipeline.NewArchiveReader(srcPath, skip, matcher)
 	defer ar.Close()
 
 	pubCtx, cancel := context.WithTimeout(context.Background(), transferTimeout)

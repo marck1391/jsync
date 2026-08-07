@@ -36,7 +36,7 @@ func TestExtractArchiveRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	sandbox := filepath.Join(dir, "sandbox")
 
-	ar := NewArchiveReader(srcRoot, nil)
+	ar := NewArchiveReader(srcRoot, nil, nil)
 	defer ar.Close()
 
 	completed := map[string]string{}
@@ -92,7 +92,7 @@ func TestExtractArchiveOnFileCompleteSkipsTruncatedFile(t *testing.T) {
 		t.Fatalf("setup: %v", err)
 	}
 
-	full, err := io.ReadAll(NewArchiveReader(srcRoot, nil))
+	full, err := io.ReadAll(NewArchiveReader(srcRoot, nil, nil))
 	if err != nil {
 		t.Fatalf("read full archive: %v", err)
 	}
@@ -359,7 +359,7 @@ func TestExtractArchiveSymlinkRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	sandbox := filepath.Join(dir, "sandbox")
 
-	ar := NewArchiveReader(srcRoot, nil)
+	ar := NewArchiveReader(srcRoot, nil, nil)
 	defer ar.Close()
 	if err := ExtractArchive(ar, sandbox, nil, nil); err != nil {
 		t.Fatalf("ExtractArchive: %v", err)

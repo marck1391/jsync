@@ -83,7 +83,7 @@ func TestReceiveSessionSuccess(t *testing.T) {
 
 	sendDone := make(chan error, 1)
 	go func() {
-		ar := pipeline.NewArchiveReader(srcRoot, nil)
+		ar := pipeline.NewArchiveReader(srcRoot, nil, nil)
 		defer ar.Close()
 		sendDone <- publishOnceStreamExists(ctx, js, sess.ID, ar, nil)
 	}()
@@ -165,7 +165,7 @@ func TestReceiveSessionEncryptedSuccess(t *testing.T) {
 
 	sendDone := make(chan error, 1)
 	go func() {
-		ar := pipeline.NewArchiveReader(srcRoot, nil)
+		ar := pipeline.NewArchiveReader(srcRoot, nil, nil)
 		defer ar.Close()
 		sendDone <- publishOnceStreamExists(ctx, js, sess.ID, ar, enc)
 	}()
@@ -306,7 +306,7 @@ func TestReceiveSessionResumesAfterPark(t *testing.T) {
 	defer cancel()
 
 	// --- Attempt 1: cut short partway through, simulating a dead sender. ---
-	full, err := io.ReadAll(pipeline.NewArchiveReader(srcRoot, nil))
+	full, err := io.ReadAll(pipeline.NewArchiveReader(srcRoot, nil, nil))
 	if err != nil {
 		t.Fatalf("read full archive: %v", err)
 	}
@@ -354,7 +354,7 @@ func TestReceiveSessionResumesAfterPark(t *testing.T) {
 	// already have (exactly what a real resuming sender would compute from
 	// Response.ResumedFiles via pipeline.NewArchiveReader's skip param). ---
 	skip := map[string]string{"a.txt": wantHash(aContent), "b.txt": wantHash(bContent)}
-	partial := pipeline.NewArchiveReader(srcRoot, skip)
+	partial := pipeline.NewArchiveReader(srcRoot, skip, nil)
 
 	sess2 := &handshake.Session{ID: "sess-resume-2", DestPath: destDir, PeerPublicKey: initiatorID.PublicKey}
 	statusCh2 := subscribeStatus(t, node.Conn, sess2.ID)
