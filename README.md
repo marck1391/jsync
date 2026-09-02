@@ -11,6 +11,12 @@ machines (Host↔VM, P2P, or a central hub) over [NATS] / JetStream, with an
 SSH-style Ed25519 identity handshake and optional end-to-end encryption
 (X3DH + Double Ratchet).
 
+`watch` mode is **not** a periodic rsync diff. It hooks the operating system's
+filesystem-change events and mirrors each file **operation** — create, write, rename,
+delete — to the linked nodes/hub as it happens. The intent is closer to `virtiofs` or a
+shared volume than to a scheduled sync: you edit on one side and the change is *replayed*
+on the others, live. Each node still keeps its own real, local copy on its own disk.
+
 <p>
   <img alt="Go" src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-informational">
@@ -46,11 +52,15 @@ jsync watch ./project vm-01:/home/dev/project
 
 ## Why jsync
 
-- **Two-way live sync** — a native filesystem watcher (Windows `ReadDirectoryChangesW`,
-  Linux/macOS `notify`) on both ends. Edits, renames and deletes propagate in either
-  direction; an initial reconciliation converges diverged trees before live sync starts.
-- **No shared filesystem, no polling** — replaces NFS/SMB volumes and `rsync` cron loops
-  for the Host↔VM / Host↔container case.
+- **Event-driven operation mirroring** — a native filesystem watcher (Windows
+  `ReadDirectoryChangesW`, Linux/macOS `notify`) on every node turns each create / write /
+  rename / delete into an event that is replayed on the linked nodes. No scanning, no
+  diffing, no polling loop — the operation itself is what travels. An initial
+  reconciliation converges diverged trees before live mirroring starts.
+- **`virtiofs`-shaped, without a shared filesystem** — the same "one directory, present on
+  both machines" experience as virtiofs or an NFS/SMB volume, for the Host↔VM /
+  Host↔container case — but each node holds its own real local copy, so it survives the
+  link going down and needs no mount.
 - **Atomic transfers with resume** — `share` streams a `tar`/`gzip` chunk stream through
   JetStream into a sandbox, then commits atomically. A dropped connection resumes on the
   next attempt, skipping whatever the destination already has (per-file granularity).
