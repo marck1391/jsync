@@ -1,4 +1,4 @@
-// Package ignore parses .fileshareignore files (gitignore syntax: globs,
+// Package ignore parses .jsyncignore files (gitignore syntax: globs,
 // negation with !, comments) via github.com/sabhiram/go-gitignore rather
 // than hand-rolling glob semantics — those have enough real edge cases
 // (anchoring, **, character classes) that reusing a well-exercised parser

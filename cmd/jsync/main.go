@@ -1,5 +1,5 @@
-// Command fileshare is the CLI client: a short-lived process that talks to
-// the local or remote fileshared node over NATS to trigger one-off
+// Command jsync is the CLI client: a short-lived process that talks to
+// the local or remote jsyncd node over NATS to trigger one-off
 // operations (share, pull, watch, resolve, keys) — it does not itself keep
 // any long-running state, that belongs to the daemon (Fase 4).
 package main
@@ -22,18 +22,19 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"filesharer/internal/config"
-	"filesharer/internal/crypto/ratchet"
-	"filesharer/internal/crypto/x3dh"
-	"filesharer/internal/daemon"
-	"filesharer/internal/handshake"
-	"filesharer/internal/identity"
-	"filesharer/internal/ignore"
-	"filesharer/internal/pipeline"
-	"filesharer/internal/progress"
-	"filesharer/internal/syncfs"
-	fsnats "filesharer/internal/transport/nats"
-	"filesharer/internal/watch"
+	"jsync/internal/auditlog"
+	"jsync/internal/config"
+	"jsync/internal/crypto/ratchet"
+	"jsync/internal/crypto/x3dh"
+	"jsync/internal/daemon"
+	"jsync/internal/handshake"
+	"jsync/internal/identity"
+	"jsync/internal/ignore"
+	"jsync/internal/pipeline"
+	"jsync/internal/progress"
+	"jsync/internal/syncfs"
+	fsnats "jsync/internal/transport/nats"
+	"jsync/internal/watch"
 )
 
 type subcommand struct {
@@ -43,11 +44,13 @@ type subcommand struct {
 }
 
 var subcommands = []subcommand{
-	{"share", "fileshare share [--config path] <local-path> <target-machine-id>:<dest-path>", cmdShare},
-	{"pull", "fileshare pull <target-machine-id>:<path> <dest>", blockedOnPhase("Fase 2 (motor de streaming)")},
-	{"watch", "fileshare watch [--config path] <local-path> <target-machine-id>:<dest-path>", cmdWatch},
-	{"resolve", "fileshare resolve <conflict-file>", blockedOnPhase("Fase 5 (conflictos)")},
-	{"keys", "fileshare keys [--config path] generate|show|authorize <base64-pubkey>", cmdKeys},
+	{"share", "jsync share [--config path] <local-path> <target-machine-id>:<dest-path>", cmdShare},
+	{"pull", "jsync pull <target-machine-id>:<path> <dest>", blockedOnPhase("Fase 2 (motor de streaming)")},
+	{"watch", "jsync watch [--config path] <local-path> <target-machine-id>:<dest-path>", cmdWatch},
+	{"log", "jsync log [--config path] [--session id] [--path substr] [--since when] [--json] [--files] [root]", cmdLog},
+	{"allow", "jsync allow [--config path] <dest-path> | jsync allow --remove <dest-path> | jsync allow --list", cmdAllow},
+	{"resolve", "jsync resolve <conflict-file>", blockedOnPhase("Fase 5 (conflictos)")},
+	{"keys", "jsync keys [--config path] generate|show|authorize <base64-pubkey>", cmdKeys},
 }
 
 func blockedOnPhase(phase string) func([]string) error {
@@ -68,13 +71,13 @@ func main() {
 			continue
 		}
 		if err := sc.run(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "fileshare %s: %v\n", name, err)
+			fmt.Fprintf(os.Stderr, "jsync %s: %v\n", name, err)
 			os.Exit(1)
 		}
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "fileshare: unknown command %q\n\n", name)
+	fmt.Fprintf(os.Stderr, "jsync: unknown command %q\n\n", name)
 	printUsage()
 	os.Exit(1)
 }
@@ -86,13 +89,15 @@ func printUsage() {
 	}
 }
 
-// loadLocalIdentity reads config.yaml (or its defaults) and this node's
-// identity — the same first-boot-generates pattern fileshared uses, so a
-// bare `fileshare` invocation on a fresh machine works without any setup
-// beyond `fileshare keys show` to hand your public key to whoever you want
-// to talk to.
+// loadLocalIdentity resolves the config file (--config, else $JSYNC_CONFIG,
+// else ./jsync.yaml, else ~/.config/jsync/config.yaml — see config.Resolve),
+// reads it (or its defaults), and loads this node's identity — the same
+// first-boot-generates pattern jsyncd uses, so a bare `jsync` invocation on
+// a fresh machine works without any setup beyond `jsync keys show` to hand
+// your public key to whoever you want to talk to.
 func loadLocalIdentity(cfgPath string) (*config.Config, *identity.Identity, error) {
-	cfg, err := config.Load(cfgPath)
+	resolved, _ := config.Resolve(cfgPath)
+	cfg, err := config.Load(resolved)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load config: %w", err)
 	}
@@ -114,13 +119,13 @@ func loadLocalIdentity(cfgPath string) (*config.Config, *identity.Identity, erro
 
 func cmdKeys(args []string) error {
 	fs := flag.NewFlagSet("keys", flag.ContinueOnError)
-	cfgPath := fs.String("config", "config.yaml", "path to daemon config file")
+	cfgPath := fs.String("config", "", "path to the jsync config file (default: ./jsync.yaml or ~/.config/jsync/config.yaml)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	rest := fs.Args()
 	if len(rest) == 0 {
-		return fmt.Errorf("usage: fileshare keys generate|show|authorize <base64-pubkey>")
+		return fmt.Errorf("usage: jsync keys generate|show|authorize <base64-pubkey>")
 	}
 
 	cfg, id, err := loadLocalIdentity(*cfgPath)
@@ -138,7 +143,7 @@ func cmdKeys(args []string) error {
 
 	case "authorize":
 		if len(rest) < 2 {
-			return fmt.Errorf("usage: fileshare keys authorize <base64-pubkey>")
+			return fmt.Errorf("usage: jsync keys authorize <base64-pubkey>")
 		}
 		raw, err := base64.StdEncoding.DecodeString(rest[1])
 		if err != nil {
@@ -164,9 +169,9 @@ func cmdKeys(args []string) error {
 }
 
 // buildEncryption loads this node's own X3DH material (the same
-// prekeys.json a fileshared responder would use, generated on first use if
-// it doesn't exist yet — a plain `fileshare share` never needs to have run
-// `fileshared` first) and runs the initiator side of X3DH against the
+// prekeys.json a jsyncd responder would use, generated on first use if
+// it doesn't exist yet — a plain `jsync share` never needs to have run
+// `jsyncd` first) and runs the initiator side of X3DH against the
 // responder's bundle from the handshake response, returning a ready
 // pipeline.Encryption for PublishArchive.
 func buildEncryption(cfg *config.Config, id *identity.Identity, bundle x3dh.Bundle) (*pipeline.Encryption, error) {
@@ -256,7 +261,7 @@ func (e *fatalShareError) Unwrap() error { return e.err }
 
 func cmdShare(args []string) error {
 	fs := flag.NewFlagSet("share", flag.ContinueOnError)
-	cfgPath := fs.String("config", "config.yaml", "path to daemon config file")
+	cfgPath := fs.String("config", "", "path to the jsync config file (default: ./jsync.yaml or ~/.config/jsync/config.yaml)")
 	timeout := fs.Duration("timeout", 10*time.Second, "handshake timeout")
 	transferTimeout := fs.Duration("transfer-timeout", 2*time.Minute, "how long to wait for the transfer to finish after the handshake is approved")
 	encrypt := fs.Bool("encrypt", false, "end-to-end encrypt the transfer (Fase 3: X3DH + Double Ratchet, chunk contents unreadable to the NATS broker)")
@@ -267,7 +272,7 @@ func cmdShare(args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) != 2 {
-		return fmt.Errorf("usage: fileshare share [--config path] <local-path> <target-machine-id>:<dest-path>")
+		return fmt.Errorf("usage: jsync share [--config path] <local-path> <target-machine-id>:<dest-path>")
 	}
 	srcPath, target := rest[0], rest[1]
 
@@ -284,18 +289,18 @@ func cmdShare(args []string) error {
 		return err
 	}
 
-	// fileshare is a short-lived client of the fileshared daemon already
+	// jsync is a short-lived client of the jsyncd daemon already
 	// running on this machine (Fase 4) — it connects directly to that
 	// daemon's plain client port instead of standing up its own embedded
 	// NATS server/leaf link. Only the daemon needs to be a routable node
 	// in the mesh (hub or peer); a one-shot CLI command just needs to
 	// reach it, which is why cmdShare and cmdKeys share the same
-	// config.yaml as the local fileshared: cfg.Host/cfg.Port is where
+	// config.yaml as the local jsyncd: cfg.Host/cfg.Port is where
 	// that daemon is already listening.
 	brokerURL := fmt.Sprintf("nats://%s:%d", cfg.Host, cfg.Port)
 	conn, err := natsgo.Connect(brokerURL)
 	if err != nil {
-		return fmt.Errorf("connect to local fileshared at %s: %w", brokerURL, err)
+		return fmt.Errorf("connect to local jsyncd at %s: %w", brokerURL, err)
 	}
 	defer conn.Close()
 
@@ -393,8 +398,8 @@ func shareAttempt(conn *natsgo.Conn, js jetstream.JetStream, cfg *config.Config,
 	// Fase 2's share had no exclusion at all before this — it walked and
 	// sent everything, including a config.yaml/identity.json/prekeys.json
 	// that happened to live inside srcPath. Same matcher watch already
-	// applies: DefaultPatterns (now including .fileshare/, see
-	// internal/ignore) plus any .fileshareignore at srcPath's root.
+	// applies: DefaultPatterns (now including .jsync/, see
+	// internal/ignore) plus any .jsyncignore at srcPath's root.
 	matcher, err := ignore.Load(srcPath)
 	if err != nil {
 		return fmt.Errorf("load %s: %w", ignore.FileName, err)
@@ -461,8 +466,8 @@ func shareAttempt(conn *natsgo.Conn, js jetstream.JetStream, cfg *config.Config,
 const watchBootstrapTimeout = 15 * time.Second
 
 // cmdWatch runs a live, bidirectional Fase 5 sync session: it handshakes
-// with DirectionBidirectional (fileshared's OnApproved starts a matching
-// Watcher on its own side, see cmd/fileshared), runs Fase 5 §1's initial
+// with DirectionBidirectional (jsyncd's OnApproved starts a matching
+// Watcher on its own side, see cmd/jsyncd), runs Fase 5 §1's initial
 // reconciliation against the peer (syncfs.Reconcile) so anything either
 // side changed while disconnected converges before anything else happens,
 // then watches localPath and both publishes its own changes and applies
@@ -472,7 +477,7 @@ const watchBootstrapTimeout = 15 * time.Second
 // buildWatchEncryption.
 func cmdWatch(args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
-	cfgPath := fs.String("config", "config.yaml", "path to daemon config file")
+	cfgPath := fs.String("config", "", "path to the jsync config file (default: ./jsync.yaml or ~/.config/jsync/config.yaml)")
 	timeout := fs.Duration("timeout", 10*time.Second, "handshake timeout")
 	encrypt := fs.Bool("encrypt", false, "end-to-end encrypt the session (Fase 3: X3DH + Double Ratchet, event contents unreadable to the NATS broker)")
 	if err := fs.Parse(args); err != nil {
@@ -480,7 +485,7 @@ func cmdWatch(args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) != 2 {
-		return fmt.Errorf("usage: fileshare watch [--config path] <local-path> <target-machine-id>:<dest-path>")
+		return fmt.Errorf("usage: jsync watch [--config path] <local-path> <target-machine-id>:<dest-path>")
 	}
 	localPath, target := rest[0], rest[1]
 
@@ -504,7 +509,7 @@ func cmdWatch(args []string) error {
 	brokerURL := fmt.Sprintf("nats://%s:%d", cfg.Host, cfg.Port)
 	conn, err := natsgo.Connect(brokerURL)
 	if err != nil {
-		return fmt.Errorf("connect to local fileshared at %s: %w", brokerURL, err)
+		return fmt.Errorf("connect to local jsyncd at %s: %w", brokerURL, err)
 	}
 	defer conn.Close()
 
@@ -554,11 +559,20 @@ func cmdWatch(args []string) error {
 		return fmt.Errorf("load %s: %w", ignore.FileName, err)
 	}
 
+	var lg *auditlog.Logger
+	if cfg.AuditLog {
+		lg, err = auditlog.Open(cfg.AuditLogDir, localPath, resp.SessionID)
+		if err != nil {
+			return fmt.Errorf("open audit log: %w", err)
+		}
+		defer lg.Close()
+	}
+
 	echo := syncfs.NewEchoGuard()
 	versions := syncfs.NewVersionStore()
 
 	onConflict := func(ev syncfs.Event, conflictPath string) {
-		fmt.Fprintf(os.Stderr, "fileshare watch: conflict on %s, wrote %s — resolve manually\n", ev.RelPath, conflictPath)
+		fmt.Fprintf(os.Stderr, "jsync watch: conflict on %s, wrote %s — resolve manually\n", ev.RelPath, conflictPath)
 	}
 
 	// Fase 5 §1: converge with whatever targetMachineID's side already has
@@ -566,7 +580,7 @@ func cmdWatch(args []string) error {
 	// while disconnected (or a first sync between two non-empty
 	// directories) would never propagate, only changes from this point on.
 	fmt.Println("reconciling with", targetMachineID+"...")
-	if err := syncfs.Reconcile(ctx, js, cons, subject, id.MachineID, targetMachineID, localPath, matcher, versions, echo, onConflict, enc); err != nil {
+	if err := syncfs.Reconcile(ctx, js, cons, subject, id.MachineID, targetMachineID, localPath, matcher, versions, echo, onConflict, enc, lg); err != nil {
 		return fmt.Errorf("initial reconciliation with %s: %w", targetMachineID, err)
 	}
 
@@ -575,23 +589,23 @@ func cmdWatch(args []string) error {
 	defer fw.Close()
 	go func() {
 		for werr := range watchErrs {
-			fmt.Fprintln(os.Stderr, "fileshare watch: local watch error:", werr)
+			fmt.Fprintln(os.Stderr, "jsync watch: local watch error:", werr)
 		}
 	}()
 
 	errCh := make(chan error, 2)
 	go func() {
-		errCh <- syncfs.PublishChanges(ctx, js, subject, id.MachineID, localPath, changes, echo, versions, enc)
+		errCh <- syncfs.PublishChanges(ctx, js, subject, id.MachineID, localPath, changes, echo, versions, enc, lg)
 	}()
 	go func() {
-		errCh <- syncfs.ReceiveChanges(ctx, cons, id.MachineID, localPath, echo, versions, onConflict, enc)
+		errCh <- syncfs.ReceiveChanges(ctx, cons, id.MachineID, localPath, echo, versions, onConflict, enc, lg)
 	}()
 
 	fmt.Printf("watching %s <-> %s:%s (Ctrl+C to stop)\n", localPath, targetMachineID, destPath)
 
 	select {
 	case <-ctx.Done():
-		fmt.Println("fileshare watch: stopping")
+		fmt.Println("jsync watch: stopping")
 		return nil
 	case err := <-errCh:
 		if err != nil && ctx.Err() == nil {
@@ -599,4 +613,109 @@ func cmdWatch(args []string) error {
 		}
 		return nil
 	}
+}
+
+// cmdLog prints this node's Fase 6 operation log (internal/auditlog): the
+// mirrored file mutations a `watch` session applied locally (dir "in") or
+// published to the peer (dir "out"), and what this node decided for each
+// (applied / conflict / stale / …). It reads the local log files directly —
+// no daemon or NATS connection needed — since the log lives next to
+// whichever node did the mirroring.
+func cmdLog(args []string) error {
+	fs := flag.NewFlagSet("log", flag.ContinueOnError)
+	cfgPath := fs.String("config", "", "path to the jsync config file (default: ./jsync.yaml or ~/.config/jsync/config.yaml)")
+	session := fs.String("session", "", "only show operations from this session id")
+	pathSub := fs.String("path", "", "only show operations whose path contains this substring")
+	since := fs.String("since", "", "only show operations at or after this time (RFC3339, '2006-01-02', or '2006-01-02 15:04:05')")
+	asJSON := fs.Bool("json", false, "emit the raw JSONL records instead of a table")
+	listFiles := fs.Bool("files", false, "list the audit log files and the roots they cover, then exit")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	resolved, _ := config.Resolve(*cfgPath)
+	cfg, err := config.Load(resolved)
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+	dir := cfg.AuditLogDir
+
+	if *listFiles {
+		roots, err := auditlog.Roots(dir)
+		if err != nil {
+			return fmt.Errorf("read audit log dir: %w", err)
+		}
+		if len(roots) == 0 {
+			fmt.Println("no audit logs under", dir)
+			return nil
+		}
+		for key, root := range roots {
+			fmt.Printf("%s.jsonl\t%s\n", key, root)
+		}
+		return nil
+	}
+
+	var sinceT time.Time
+	if *since != "" {
+		sinceT, err = parseSince(*since)
+		if err != nil {
+			return err
+		}
+	}
+
+	root := ""
+	switch rest := fs.Args(); len(rest) {
+	case 0:
+	case 1:
+		root = rest[0]
+	default:
+		return fmt.Errorf("usage: jsync log [flags] [root]")
+	}
+
+	recs, err := auditlog.List(dir, auditlog.Query{Root: root, Session: *session, Path: *pathSub, Since: sinceT})
+	if err != nil {
+		return fmt.Errorf("read audit log: %w", err)
+	}
+	if len(recs) == 0 {
+		fmt.Println("no operations logged")
+		return nil
+	}
+
+	if *asJSON {
+		enc := json.NewEncoder(os.Stdout)
+		for _, r := range recs {
+			if err := enc.Encode(r); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	for _, r := range recs {
+		path := r.RelPath
+		if r.Op == "rename" {
+			path = r.OldRelPath + " -> " + r.RelPath
+		}
+		line := fmt.Sprintf("%s  %-3s  %-7s  %-13s  %s",
+			r.Time.Local().Format("2006-01-02 15:04:05"), r.Dir, r.Op, r.Outcome, path)
+		switch {
+		case r.ConflictPath != "":
+			line += "  (" + r.ConflictPath + ")"
+		case r.Detail != "":
+			line += "  (" + r.Detail + ")"
+		}
+		fmt.Println(line)
+	}
+	return nil
+}
+
+// parseSince accepts a few progressively looser timestamp layouts for
+// `jsync log --since`, all interpreted in local time.
+func parseSince(s string) (time.Time, error) {
+	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02"} {
+		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("cannot parse --since %q (want RFC3339, '2006-01-02', or '2006-01-02 15:04:05')", s)
 }

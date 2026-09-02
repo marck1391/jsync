@@ -10,11 +10,11 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"filesharer/internal/crypto/ratchet"
-	"filesharer/internal/crypto/x3dh"
-	"filesharer/internal/identity"
-	"filesharer/internal/pipeline"
-	fsnats "filesharer/internal/transport/nats"
+	"jsync/internal/crypto/ratchet"
+	"jsync/internal/crypto/x3dh"
+	"jsync/internal/identity"
+	"jsync/internal/pipeline"
+	fsnats "jsync/internal/transport/nats"
 )
 
 // smallChunkSize forces several chunks even for the small test fixtures,
@@ -103,7 +103,7 @@ func TestSendReceiveCommitRoundTrip(t *testing.T) {
 // with Fase 3 encryption turned on end to end: real X3DH against a real
 // Bundle, a real Double Ratchet chain encrypting each chunk, and the
 // receiver deriving its side purely from what rides chunk 0's headers —
-// exactly the path cmd/fileshare's --encrypt flag and cmd/fileshared's
+// exactly the path cmd/jsync's --encrypt flag and cmd/jsyncd's
 // daemon.ReceiveSession drive in production.
 func TestSendReceiveCommitRoundTripEncrypted(t *testing.T) {
 	node, err := fsnats.Bootstrap(fsnats.Config{

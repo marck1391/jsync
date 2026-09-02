@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"filesharer/internal/identity"
+	"jsync/internal/identity"
 )
 
 // ClockSkew is the maximum allowed difference between a Request's Timestamp

@@ -11,11 +11,11 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"filesharer/internal/crypto/x3dh"
-	"filesharer/internal/handshake"
-	"filesharer/internal/identity"
-	"filesharer/internal/pipeline"
-	fsnats "filesharer/internal/transport/nats"
+	"jsync/internal/crypto/x3dh"
+	"jsync/internal/handshake"
+	"jsync/internal/identity"
+	"jsync/internal/pipeline"
+	fsnats "jsync/internal/transport/nats"
 )
 
 // TestReceiveSessionPublishesProgressThenFinalStatus proves ReceiveSession

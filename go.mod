@@ -1,4 +1,4 @@
-module filesharer
+module jsync
 
 go 1.26.2
 

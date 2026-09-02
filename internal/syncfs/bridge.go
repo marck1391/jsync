@@ -9,7 +9,8 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"filesharer/internal/watch"
+	"jsync/internal/auditlog"
+	"jsync/internal/watch"
 )
 
 // eventFetchTimeout bounds how long ReceiveChanges blocks per Fetch call.
@@ -40,14 +41,16 @@ const eventFetchTimeout = 2 * time.Second
 // completed the bootstrap dance (PublishBootstrap/ReceiveBootstrapAck or
 // their responder-side mirrors) before calling this, so enc.SendChain's
 // counter starts in lockstep with what the peer's enc.RecvChain expects.
-func PublishChanges(ctx context.Context, js jetstream.JetStream, subject, machineID, root string, changes <-chan watch.ChangeEvent, echo *EchoGuard, versions *VersionStore, enc *Encryption) error {
+// lg, if non-nil, records every published mutation (Fase 6 / auditlog) —
+// nil is a valid no-op sink, same "feature off" contract as enc.
+func PublishChanges(ctx context.Context, js jetstream.JetStream, subject, machineID, root string, changes <-chan watch.ChangeEvent, echo *EchoGuard, versions *VersionStore, enc *Encryption, lg *auditlog.Logger) error {
 	for {
 		select {
 		case cev, ok := <-changes:
 			if !ok {
 				return nil
 			}
-			if err := publishOne(ctx, js, subject, machineID, root, cev, echo, versions, enc); err != nil {
+			if err := publishOne(ctx, js, subject, machineID, root, cev, echo, versions, enc, lg); err != nil {
 				return err
 			}
 		case <-ctx.Done():
@@ -56,9 +59,13 @@ func PublishChanges(ctx context.Context, js jetstream.JetStream, subject, machin
 	}
 }
 
-func publishOne(ctx context.Context, js jetstream.JetStream, subject, machineID, root string, cev watch.ChangeEvent, echo *EchoGuard, versions *VersionStore, enc *Encryption) error {
+func publishOne(ctx context.Context, js jetstream.JetStream, subject, machineID, root string, cev watch.ChangeEvent, echo *EchoGuard, versions *VersionStore, enc *Encryption, lg *auditlog.Logger) error {
 	switch cev.Kind {
 	case watch.ChangeRescan:
+		lg.Log(auditlog.Record{
+			Dir: "out", Origin: machineID, Op: "rescan", Outcome: "rescan-dropped",
+			Detail: "kernel watch buffer overflowed; changes since the last event may be lost until the next reconcile",
+		})
 		// Reconcile (reconcile.go) now exists, but only as a one-shot run
 		// before the live loop starts — re-running it mid-session from here
 		// would need to pause ReceiveChanges' own Fetch on the same cons
@@ -85,6 +92,7 @@ func publishOne(ctx context.Context, js jetstream.JetStream, subject, machineID,
 			return nil
 		}
 		version := versions.Bump(cev.RelPath, machineID)
+		plainLen := int64(len(data))
 		ev := Event{Origin: machineID, Op: OpWrite, RelPath: cev.RelPath, ContentHash: hash, Data: data, Version: version}
 		if enc != nil {
 			ciphertext, seq, err := enc.SendChain.Encrypt(data, enc.AssociatedData)
@@ -94,13 +102,29 @@ func publishOne(ctx context.Context, js jetstream.JetStream, subject, machineID,
 			ev.Data = ciphertext
 			ev.Seq = seq
 		}
-		return publish(ctx, js, subject, ev)
+		opID, err := publishAck(ctx, js, subject, ev)
+		if err != nil {
+			return err
+		}
+		lg.Log(auditlog.Record{
+			OpID: opID, Dir: "out", Origin: machineID, Op: string(OpWrite),
+			RelPath: cev.RelPath, ContentHash: hash, Bytes: plainLen, Outcome: "published",
+		})
+		return nil
 
 	case watch.ChangeRemoved:
 		if echo.IsEchoRemove(cev.RelPath) {
 			return nil
 		}
-		return publish(ctx, js, subject, Event{Origin: machineID, Op: OpRemove, RelPath: cev.RelPath})
+		opID, err := publishAck(ctx, js, subject, Event{Origin: machineID, Op: OpRemove, RelPath: cev.RelPath})
+		if err != nil {
+			return err
+		}
+		lg.Log(auditlog.Record{
+			OpID: opID, Dir: "out", Origin: machineID, Op: string(OpRemove),
+			RelPath: cev.RelPath, Outcome: "published",
+		})
+		return nil
 
 	case watch.ChangeRenamed:
 		// Unlike OpWrite, applyRename really does call os.Rename to mirror
@@ -114,7 +138,15 @@ func publishOne(ctx context.Context, js jetstream.JetStream, subject, machineID,
 		if echo.IsEchoRename(cev.OldRelPath, cev.RelPath) {
 			return nil
 		}
-		return publish(ctx, js, subject, Event{Origin: machineID, Op: OpRename, RelPath: cev.RelPath, OldRelPath: cev.OldRelPath})
+		opID, err := publishAck(ctx, js, subject, Event{Origin: machineID, Op: OpRename, RelPath: cev.RelPath, OldRelPath: cev.OldRelPath})
+		if err != nil {
+			return err
+		}
+		lg.Log(auditlog.Record{
+			OpID: opID, Dir: "out", Origin: machineID, Op: string(OpRename),
+			RelPath: cev.RelPath, OldRelPath: cev.OldRelPath, Outcome: "published",
+		})
+		return nil
 	}
 	return nil
 }
@@ -128,25 +160,42 @@ func publishOne(ctx context.Context, js jetstream.JetStream, subject, machineID,
 // it. Shared between ReceiveChanges' live loop and Reconcile's initial
 // drain (reconcile.go) — the two differ only in when they stop looping and
 // how they source events, not in how a single event is applied.
-func applyEvent(ev Event, destRoot string, echo *EchoGuard, versions *VersionStore, onConflict func(ev Event, conflictPath string)) error {
+//
+// opID is the underlying JetStream stream sequence (0 if unavailable) and
+// lg, if non-nil, records the outcome — applied / conflict / stale / error
+// — which is exactly the piece the events stream itself never carries.
+func applyEvent(ev Event, destRoot string, echo *EchoGuard, versions *VersionStore, onConflict func(ev Event, conflictPath string), opID uint64, lg *auditlog.Logger) error {
+	rec := auditlog.Record{
+		OpID: opID, Dir: "in", Origin: ev.Origin, Op: string(ev.Op),
+		RelPath: ev.RelPath, OldRelPath: ev.OldRelPath, ContentHash: ev.ContentHash,
+	}
 	if ev.Op == OpWrite {
+		rec.Bytes = int64(len(ev.Data))
 		safe, conflict := versions.Reconcile(ev.RelPath, ev.Version)
 		if conflict {
 			conflictPath, err := ApplyConflict(ev, destRoot)
 			if err != nil {
+				rec.Outcome, rec.Detail = "error", err.Error()
+				lg.Log(rec)
 				return fmt.Errorf("syncfs: write conflict file for %s: %w", ev.RelPath, err)
 			}
 			if onConflict != nil {
 				onConflict(ev, conflictPath)
 			}
+			rec.Outcome, rec.ConflictPath = "conflict", conflictPath
+			lg.Log(rec)
 			return nil
 		}
 		if !safe {
-			return nil // stale: a re-delivery, or an update already causally superseded — nothing to apply
+			rec.Outcome = "stale" // a re-delivery, or an update already causally superseded — nothing to apply
+			lg.Log(rec)
+			return nil
 		}
 	}
 
 	if err := Apply(ev, destRoot); err != nil {
+		rec.Outcome, rec.Detail = "error", err.Error()
+		lg.Log(rec)
 		return fmt.Errorf("syncfs: apply %s %s: %w", ev.Op, ev.RelPath, err)
 	}
 	switch ev.Op {
@@ -157,18 +206,30 @@ func applyEvent(ev Event, destRoot string, echo *EchoGuard, versions *VersionSto
 	case OpRename:
 		echo.MarkRenamed(ev.OldRelPath, ev.RelPath)
 	}
+	rec.Outcome = "applied"
+	lg.Log(rec)
 	return nil
 }
 
-func publish(ctx context.Context, js jetstream.JetStream, subject string, ev Event) error {
+// publishAck marshals and publishes ev, returning the assigned JetStream
+// stream sequence — the id the audit log records so a line there points
+// back at the events stream. publish is the same thing where the sequence
+// isn't needed (control messages).
+func publishAck(ctx context.Context, js jetstream.JetStream, subject string, ev Event) (uint64, error) {
 	data, err := json.Marshal(ev)
 	if err != nil {
-		return fmt.Errorf("syncfs: encode event: %w", err)
+		return 0, fmt.Errorf("syncfs: encode event: %w", err)
 	}
-	if _, err := js.Publish(ctx, subject, data); err != nil {
-		return fmt.Errorf("syncfs: publish event: %w", err)
+	ack, err := js.Publish(ctx, subject, data)
+	if err != nil {
+		return 0, fmt.Errorf("syncfs: publish event: %w", err)
 	}
-	return nil
+	return ack.Sequence, nil
+}
+
+func publish(ctx context.Context, js jetstream.JetStream, subject string, ev Event) error {
+	_, err := publishAck(ctx, js, subject, ev)
+	return err
 }
 
 // ReceiveChanges pulls events from cons and applies each to destRoot,
@@ -193,7 +254,10 @@ func publish(ctx context.Context, js jetstream.JetStream, subject string, ev Eve
 // enc.RecvChain (Fase 3) before Reconcile/Apply ever sees it — nil means
 // the session is unencrypted. The caller must have already completed the
 // bootstrap dance, same requirement as PublishChanges.
-func ReceiveChanges(ctx context.Context, cons jetstream.Consumer, machineID, destRoot string, echo *EchoGuard, versions *VersionStore, onConflict func(ev Event, conflictPath string), enc *Encryption) error {
+//
+// lg, if non-nil, records each applied mutation and its outcome (Fase 6 /
+// auditlog); nil is a valid no-op sink.
+func ReceiveChanges(ctx context.Context, cons jetstream.Consumer, machineID, destRoot string, echo *EchoGuard, versions *VersionStore, onConflict func(ev Event, conflictPath string), enc *Encryption, lg *auditlog.Logger) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -246,7 +310,11 @@ func ReceiveChanges(ctx context.Context, cons jetstream.Consumer, machineID, des
 				ev.Data = plaintext
 			}
 
-			if err := applyEvent(ev, destRoot, echo, versions, onConflict); err != nil {
+			var opID uint64
+			if meta, metaErr := msg.Metadata(); metaErr == nil {
+				opID = meta.Sequence.Stream
+			}
+			if err := applyEvent(ev, destRoot, echo, versions, onConflict, opID, lg); err != nil {
 				_ = msg.Nak()
 				return err
 			}

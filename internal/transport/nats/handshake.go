@@ -7,11 +7,11 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 
-	"filesharer/internal/handshake"
-	"filesharer/internal/identity"
+	"jsync/internal/handshake"
+	"jsync/internal/identity"
 )
 
-// ServeHandshake subscribes to this node's fileshare.control.<machineID>.
+// ServeHandshake subscribes to this node's jsync.control.<machineID>.
 // handshake subject and answers every request with r.Handle (Fase 1 §3).
 // The caller (Fase 4's dispatcher) owns the returned subscription's
 // lifetime.

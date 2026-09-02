@@ -6,12 +6,12 @@ import (
 	"crypto/rand"
 	"testing"
 
-	"filesharer/internal/crypto/ratchet"
+	"jsync/internal/crypto/ratchet"
 )
 
 // TestBidirectionalChains derives the pair of directional chains Fase 5's
 // Watcher session needs (see internal/daemon.WatchSession and
-// cmd/fileshare's buildWatchEncryption) the same way the real orchestration
+// cmd/jsync's buildWatchEncryption) the same way the real orchestration
 // will: Alice derives her outbound chain the usual X3DH way, Bob mirrors it
 // into his inbound chain via DeriveResponderChains, Bob derives a fresh
 // outbound chain from a brand-new ephemeral keypair, and Alice mirrors that

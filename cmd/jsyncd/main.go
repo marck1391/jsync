@@ -1,4 +1,4 @@
-// Command fileshared is the always-running node process (Fase 4): it
+// Command jsyncd is the always-running node process (Fase 4): it
 // bootstraps the NATS connection in either hub or peer role (Fase 1),
 // answers handshake requests, consumes JetStream transfers, and runs the
 // Fase 5 filesystem watcher for any configured sync roots.
@@ -16,13 +16,13 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"filesharer/internal/config"
-	"filesharer/internal/crypto/x3dh"
-	"filesharer/internal/daemon"
-	"filesharer/internal/handshake"
-	"filesharer/internal/identity"
-	"filesharer/internal/pipeline"
-	fsnats "filesharer/internal/transport/nats"
+	"jsync/internal/config"
+	"jsync/internal/crypto/x3dh"
+	"jsync/internal/daemon"
+	"jsync/internal/handshake"
+	"jsync/internal/identity"
+	"jsync/internal/pipeline"
+	fsnats "jsync/internal/transport/nats"
 )
 
 // prekeySaveInterval bounds how long a crash (not a graceful shutdown,
@@ -38,16 +38,17 @@ const drainTimeout = 10 * time.Second
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "fileshared:", err)
+		fmt.Fprintln(os.Stderr, "jsyncd:", err)
 		os.Exit(1)
 	}
 }
 
 func run() error {
-	cfgPath := flag.String("config", "config.yaml", "path to daemon config file")
+	cfgPath := flag.String("config", "", "path to the jsync config file (default: ./jsync.yaml or ~/.config/jsync/config.yaml)")
 	flag.Parse()
 
-	cfg, err := config.Load(*cfgPath)
+	resolved, _ := config.Resolve(*cfgPath)
+	cfg, err := config.Load(resolved)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -109,8 +110,8 @@ func run() error {
 		Prekeys:    prekeys,
 		Guard:      handshake.NewReplayGuard(),
 		DefaultParams: handshake.Params{
-			MaxPayloadBytes: cfg.MaxPayloadBytes,
-			AllowedDestPath: cfg.AllowedDestPath,
+			MaxPayloadBytes:  cfg.MaxPayloadBytes,
+			AllowedDestPaths: []string(cfg.AllowedDestPaths),
 		},
 		ResumeLookup: func(peerPub ed25519.PublicKey, destPath string) []handshake.ResumedFile {
 			return resumes.Peek(peerPub, destPath)
@@ -128,23 +129,28 @@ func run() error {
 	// itself before the initiator's own Watcher could plausibly publish
 	// anything, since the initiator side has its own network round trip
 	// (EnsureEventsStream) to do first too.
+	auditLogDir := ""
+	if cfg.AuditLog {
+		auditLogDir = cfg.AuditLogDir
+	}
+
 	responder.OnApproved = func(sess *handshake.Session) {
 		if sess.Params.Direction == handshake.DirectionBidirectional {
 			go func() {
-				if err := daemon.WatchSession(ctx, node.Conn, js, sess, id.MachineID, prekeys, id.PublicKey); err != nil {
-					fmt.Fprintf(os.Stderr, "fileshared: watch session %s: %v\n", sess.ID, err)
+				if err := daemon.WatchSession(ctx, node.Conn, js, sess, id.MachineID, prekeys, id.PublicKey, auditLogDir); err != nil {
+					fmt.Fprintf(os.Stderr, "jsyncd: watch session %s: %v\n", sess.ID, err)
 				}
 			}()
 			return
 		}
 
 		if _, err := fsnats.EnsureStream(ctx, js, sess.ID); err != nil {
-			fmt.Fprintf(os.Stderr, "fileshared: ensure stream for session %s: %v\n", sess.ID, err)
+			fmt.Fprintf(os.Stderr, "jsyncd: ensure stream for session %s: %v\n", sess.ID, err)
 			return
 		}
 		go func() {
 			if err := daemon.ReceiveSession(ctx, node.Conn, js, sess, prekeys, id.PublicKey, resumes); err != nil {
-				fmt.Fprintf(os.Stderr, "fileshared: receive session %s: %v\n", sess.ID, err)
+				fmt.Fprintf(os.Stderr, "jsyncd: receive session %s: %v\n", sess.ID, err)
 			}
 		}()
 	}
@@ -155,7 +161,7 @@ func run() error {
 		return fmt.Errorf("serve handshake: %w", err)
 	}
 
-	fmt.Println("fileshared: ready")
+	fmt.Println("jsyncd: ready")
 	fmt.Println("  machine_id:", id.MachineID)
 	fmt.Println("  role:", cfg.Role)
 	fmt.Println("  client_url:", node.ClientURL())
@@ -175,25 +181,25 @@ loop:
 			break loop
 		case <-saveTicker.C:
 			if err := prekeys.Save(cfg.PrekeysPath); err != nil {
-				fmt.Fprintln(os.Stderr, "fileshared: save prekeys:", err)
+				fmt.Fprintln(os.Stderr, "jsyncd: save prekeys:", err)
 			}
 		case <-watchdogTicker.C:
 			responder.Sessions.Sweep()
 			for _, sandboxDir := range resumes.Sweep(time.Now()) {
 				if err := pipeline.AbortSandbox(sandboxDir); err != nil {
-					fmt.Fprintln(os.Stderr, "fileshared: sweep abandoned resume sandbox:", err)
+					fmt.Fprintln(os.Stderr, "jsyncd: sweep abandoned resume sandbox:", err)
 				}
 			}
 		}
 	}
 
-	fmt.Println("fileshared: shutting down")
+	fmt.Println("jsyncd: shutting down")
 	_ = sub.Unsubscribe()
 	if err := prekeys.Save(cfg.PrekeysPath); err != nil {
-		fmt.Fprintln(os.Stderr, "fileshared: save prekeys on shutdown:", err)
+		fmt.Fprintln(os.Stderr, "jsyncd: save prekeys on shutdown:", err)
 	}
 	if err := node.Drain(drainTimeout); err != nil {
-		fmt.Fprintln(os.Stderr, "fileshared: drain:", err)
+		fmt.Fprintln(os.Stderr, "jsyncd: drain:", err)
 	}
 	return nil
 }

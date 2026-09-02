@@ -17,7 +17,7 @@ import (
 // this by structural typing — this package deliberately doesn't import
 // internal/ignore directly, same decoupling internal/watch.PathMatcher
 // already uses (see its doc comment). nil means "no exclusion" — every
-// production caller (cmd/fileshare's cmdShare) passes a real
+// production caller (cmd/jsync's cmdShare) passes a real
 // internal/ignore.Matcher; nil exists mainly so tests that don't care
 // about exclusion don't need to construct one.
 type PathMatcher interface {
@@ -43,7 +43,7 @@ type PathMatcher interface {
 // the other end.
 //
 // matcher, if non-nil, excludes any root-relative path it matches — the
-// same internal/ignore.Matcher (DefaultPatterns + .fileshareignore) a
+// same internal/ignore.Matcher (DefaultPatterns + .jsyncignore) a
 // Fase 5 watch session already applies. Fase 2's share had no exclusion at
 // all before this: it walked and sent everything, including a
 // config.yaml/identity.json/prekeys.json that happened to live inside the

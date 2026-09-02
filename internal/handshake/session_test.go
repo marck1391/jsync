@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"filesharer/internal/identity"
+	"jsync/internal/identity"
 )
 
 func TestSessionStoreCreateGet(t *testing.T) {

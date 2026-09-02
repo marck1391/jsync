@@ -13,16 +13,16 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"filesharer/internal/crypto/ratchet"
-	"filesharer/internal/crypto/x3dh"
-	"filesharer/internal/syncfs"
-	fsnats "filesharer/internal/transport/nats"
-	"filesharer/internal/watch"
+	"jsync/internal/crypto/ratchet"
+	"jsync/internal/crypto/x3dh"
+	"jsync/internal/syncfs"
+	fsnats "jsync/internal/transport/nats"
+	"jsync/internal/watch"
 )
 
 // deriveTestEncryptionPair derives a matching pair of *syncfs.Encryption —
 // one for "alice" (the X3DH initiator), one for "bob" (the responder) — the
-// same way the real orchestration in cmd/fileshare's buildWatchEncryption
+// same way the real orchestration in cmd/jsync's buildWatchEncryption
 // and internal/daemon's establishResponderEncryption does, minus the actual
 // NATS bootstrap messages (that dance is those callers' job, not
 // internal/syncfs's — see encrypt.go's PublishBootstrap/ReceiveBootstrap
@@ -131,7 +131,7 @@ func TestBidirectionalEncryptedPropagation(t *testing.T) {
 		echo := syncfs.NewEchoGuard()
 		versions := syncfs.NewVersionStore()
 		go func() {
-			if err := syncfs.PublishChanges(ctx, js, subject, machineID, root, changes, echo, versions, enc); err != nil && ctx.Err() == nil {
+			if err := syncfs.PublishChanges(ctx, js, subject, machineID, root, changes, echo, versions, enc, nil); err != nil && ctx.Err() == nil {
 				t.Logf("[%s] PublishChanges: %v", machineID, err)
 			}
 		}()
@@ -141,7 +141,7 @@ func TestBidirectionalEncryptedPropagation(t *testing.T) {
 			t.Fatalf("[%s] EnsureEventsConsumer: %v", machineID, err)
 		}
 		go func() {
-			if err := syncfs.ReceiveChanges(ctx, cons, machineID, root, echo, versions, nil, enc); err != nil && ctx.Err() == nil {
+			if err := syncfs.ReceiveChanges(ctx, cons, machineID, root, echo, versions, nil, enc, nil); err != nil && ctx.Err() == nil {
 				t.Logf("[%s] ReceiveChanges: %v", machineID, err)
 			}
 		}()

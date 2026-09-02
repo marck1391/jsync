@@ -3,8 +3,8 @@ package ratchet_test
 import (
 	"testing"
 
-	"filesharer/internal/crypto/x3dh"
-	"filesharer/internal/identity"
+	"jsync/internal/crypto/x3dh"
+	"jsync/internal/identity"
 )
 
 // TestX3DHBootstrapsMatchingRatchetChains simulates the full Fase 3 flow

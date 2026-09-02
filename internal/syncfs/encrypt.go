@@ -7,7 +7,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"filesharer/internal/crypto/ratchet"
+	"jsync/internal/crypto/ratchet"
 )
 
 // Encryption bundles what PublishChanges/ReceiveChanges need to run a Fase
@@ -19,7 +19,7 @@ import (
 // single shared chain would mean two nodes' concurrent local Encrypt calls
 // could derive the identical message key and nonce for two unrelated
 // messages — a catastrophic AES-GCM nonce reuse. SendChain and RecvChain
-// are cryptographically independent (see cmd/fileshare and
+// are cryptographically independent (see cmd/jsync and
 // internal/daemon's WatchSession for how they're derived — this package
 // only ever consumes already-derived chains, the same split Fase 2's
 // pipeline package keeps from x3dh.Store).

@@ -18,7 +18,7 @@ import (
 // directorio temporal se cree en el mismo volumen físico... que el destino
 // final").
 func SandboxPath(destDir, sessionID string) string {
-	return filepath.Join(filepath.Dir(destDir), ".fileshare_tmp_"+sessionID)
+	return filepath.Join(filepath.Dir(destDir), ".jsync_tmp_"+sessionID)
 }
 
 // ExtractArchive reads a tar.gz stream from r and writes it into sandboxDir

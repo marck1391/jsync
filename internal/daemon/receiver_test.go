@@ -16,12 +16,12 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"filesharer/internal/crypto/x3dh"
-	"filesharer/internal/daemon"
-	"filesharer/internal/handshake"
-	"filesharer/internal/identity"
-	"filesharer/internal/pipeline"
-	fsnats "filesharer/internal/transport/nats"
+	"jsync/internal/crypto/x3dh"
+	"jsync/internal/daemon"
+	"jsync/internal/handshake"
+	"jsync/internal/identity"
+	"jsync/internal/pipeline"
+	fsnats "jsync/internal/transport/nats"
 )
 
 func bootstrapTestNode(t *testing.T) *fsnats.Node {
@@ -110,7 +110,7 @@ func TestReceiveSessionSuccess(t *testing.T) {
 }
 
 // TestReceiveSessionEncryptedSuccess mirrors TestReceiveSessionSuccess but
-// drives the sender side the way cmd/fileshare's --encrypt actually does:
+// drives the sender side the way cmd/jsync's --encrypt actually does:
 // real X3DH against the responder's Bundle, a real Double Ratchet chain,
 // chunk 0 carrying the bootstrap headers. Proves daemon.ReceiveSession
 // derives a matching chain purely from what's on the wire and decrypts
@@ -195,7 +195,7 @@ func TestReceiveSessionEncryptedSuccess(t *testing.T) {
 // to be TestReceiveSessionCorruptStreamFailsAndCleansUp: a failed transfer
 // no longer deletes its sandbox outright (Fase 2 "recuperación de red") —
 // it parks it in the ResumeRegistry so a later attempt from the same peer
-// can reclaim it, and only the watchdog sweep (cmd/fileshared), once the
+// can reclaim it, and only the watchdog sweep (cmd/jsyncd), once the
 // grace period actually passes, deletes it for good. This test's own
 // ResumeRegistry is never swept, so the sandbox must still be there
 // afterward — the opposite assertion from what this test used to make.
@@ -266,7 +266,7 @@ func TestReceiveSessionCorruptStreamParksSandboxForResume(t *testing.T) {
 // the sender's process died partway through, or the network dropped) and
 // its sandbox gets parked instead of deleted; a second attempt — a fresh
 // handshake.Session (different ID, same peer identity and destPath, the
-// way a relaunched `fileshare share` looks from the daemon's side) sends
+// way a relaunched `jsync share` looks from the daemon's side) sends
 // only the one file a real resume-aware sender would still need to send
 // (built via pipeline.NewArchiveReader's own skip parameter, ResumedFiles'
 // eventual sender-side consumer) and reclaims the parked sandbox. The

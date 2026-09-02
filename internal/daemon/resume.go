@@ -6,14 +6,14 @@ import (
 	"sync"
 	"time"
 
-	"filesharer/internal/handshake"
+	"jsync/internal/handshake"
 )
 
 // resumeGracePeriod is how long a parked sandbox survives without being
 // reclaimed before the watchdog sweep deletes it for good (Fase 2
 // "recuperación de red" — matches the 5-minute grace period the original
 // plan proposed for a network blip, now also covering the sender's process
-// dying and a fresh `fileshare share` invocation resuming later). Every
+// dying and a fresh `jsync share` invocation resuming later). Every
 // failed attempt that reclaims and re-parks the same transfer refreshes
 // this — the clock measures time since the *last* attempt, not since the
 // first failure.
@@ -26,7 +26,7 @@ const resumeGracePeriod = 5 * time.Minute
 // as handshake.SessionStore — nothing persisted to disk, a daemon restart
 // loses the registry (the parked sandboxes themselves are still on disk,
 // but become unreachable/orphaned; a future daemon restart could in
-// principle rediscover them by scanning for .fileshare_tmp_* directories,
+// principle rediscover them by scanning for .jsync_tmp_* directories,
 // but that's not implemented here).
 //
 // Keyed by (peer's verified Ed25519 identity, cleaned destPath) — never by

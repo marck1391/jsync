@@ -309,24 +309,24 @@ func (m prefixMatcher) Match(relPath string) bool {
 // keeps a whole excluded subtree out of the archive entirely — not just
 // filtered after the fact, but never descended into (mirrors
 // internal/watch's own exclusion, and matters in practice for something
-// like .fileshare/ holding private key material: it must never be walked,
+// like .jsync/ holding private key material: it must never be walked,
 // not merely have its content dropped after being read).
 func TestNewArchiveReaderExcludesMatchedPaths(t *testing.T) {
 	root := t.TempDir()
 	writeTestTree(t, root)
-	if err := os.MkdirAll(filepath.Join(root, ".fileshare"), 0o755); err != nil {
-		t.Fatalf("setup mkdir .fileshare: %v", err)
+	if err := os.MkdirAll(filepath.Join(root, ".jsync"), 0o755); err != nil {
+		t.Fatalf("setup mkdir .jsync: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".fileshare", "identity.json"), []byte("private key material"), 0o644); err != nil {
-		t.Fatalf("setup write .fileshare/identity.json: %v", err)
+	if err := os.WriteFile(filepath.Join(root, ".jsync", "identity.json"), []byte("private key material"), 0o644); err != nil {
+		t.Fatalf("setup write .jsync/identity.json: %v", err)
 	}
 
-	ar := NewArchiveReader(root, nil, prefixMatcher{".fileshare"})
+	ar := NewArchiveReader(root, nil, prefixMatcher{".jsync"})
 	defer ar.Close()
 
 	got := readTarEntries(t, ar)
-	if _, excluded := got[".fileshare/identity.json"]; excluded {
-		t.Error(".fileshare/identity.json was archived, want it excluded by matcher")
+	if _, excluded := got[".jsync/identity.json"]; excluded {
+		t.Error(".jsync/identity.json was archived, want it excluded by matcher")
 	}
 	want := map[string]string{
 		"a.txt":            "hello from a",
@@ -345,14 +345,14 @@ func TestNewArchiveReaderExcludesMatchedPaths(t *testing.T) {
 func TestEstimateSendSizeExcludesMatchedPaths(t *testing.T) {
 	root := t.TempDir()
 	writeTestTree(t, root) // a.txt(12) + sub/b.txt(12) + sub/deeper/c.txt(27) = 51 bytes
-	if err := os.MkdirAll(filepath.Join(root, ".fileshare"), 0o755); err != nil {
-		t.Fatalf("setup mkdir .fileshare: %v", err)
+	if err := os.MkdirAll(filepath.Join(root, ".jsync"), 0o755); err != nil {
+		t.Fatalf("setup mkdir .jsync: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".fileshare", "identity.json"), []byte("this should not be counted"), 0o644); err != nil {
-		t.Fatalf("setup write .fileshare/identity.json: %v", err)
+	if err := os.WriteFile(filepath.Join(root, ".jsync", "identity.json"), []byte("this should not be counted"), 0o644); err != nil {
+		t.Fatalf("setup write .jsync/identity.json: %v", err)
 	}
 
-	withMatcher, err := EstimateSendSize(root, nil, prefixMatcher{".fileshare"})
+	withMatcher, err := EstimateSendSize(root, nil, prefixMatcher{".jsync"})
 	if err != nil {
 		t.Fatalf("EstimateSendSize with matcher: %v", err)
 	}

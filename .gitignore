@@ -2,4 +2,12 @@
 *.exe
 *.test
 *.out
+
+# Local node state and config — never commit these
+/.jsync/
+jsync.yaml
 config.yaml
+
+# Internal design / working notes — not distributed
+/planv1/
+/CLAUDE.md

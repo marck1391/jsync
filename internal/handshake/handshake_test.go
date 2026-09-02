@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"filesharer/internal/crypto/x3dh"
-	"filesharer/internal/identity"
+	"jsync/internal/crypto/x3dh"
+	"jsync/internal/identity"
 )
 
 func newTestResponder(t *testing.T, trust *identity.Identity) (*Responder, *identity.Identity) {
@@ -39,8 +39,8 @@ func newTestResponder(t *testing.T, trust *identity.Identity) (*Responder, *iden
 		Prekeys:    prekeys,
 		Guard:      NewReplayGuard(),
 		DefaultParams: Params{
-			MaxPayloadBytes: 1 << 20,
-			AllowedDestPath: "/home/user/workspace",
+			MaxPayloadBytes:  1 << 20,
+			AllowedDestPaths: []string{"/home/user/workspace"},
 		},
 	}
 	return r, responderID

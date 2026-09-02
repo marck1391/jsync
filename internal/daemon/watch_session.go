@@ -12,13 +12,14 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"filesharer/internal/crypto/ratchet"
-	"filesharer/internal/crypto/x3dh"
-	"filesharer/internal/handshake"
-	"filesharer/internal/ignore"
-	"filesharer/internal/syncfs"
-	fsnats "filesharer/internal/transport/nats"
-	"filesharer/internal/watch"
+	"jsync/internal/auditlog"
+	"jsync/internal/crypto/ratchet"
+	"jsync/internal/crypto/x3dh"
+	"jsync/internal/handshake"
+	"jsync/internal/ignore"
+	"jsync/internal/syncfs"
+	fsnats "jsync/internal/transport/nats"
+	"jsync/internal/watch"
 )
 
 // bootstrapTimeout bounds how long an encrypted WatchSession waits for the
@@ -34,7 +35,7 @@ const bootstrapTimeout = 15 * time.Second
 // own durable consumer on it, runs Fase 5 §1's initial reconciliation
 // against the peer (syncfs.Reconcile), starts a native Watcher on
 // sess.DestPath, and bridges both directions (its own local changes out,
-// the peer's changes in) exactly the way cmd/fileshare's `watch` does on
+// the peer's changes in) exactly the way cmd/jsync's `watch` does on
 // the initiator's side — the Watcher session is symmetric, neither end is
 // privileged. Runs until ctx is done (the Daemon shutting down) or an
 // unrecoverable error; unlike ReceiveSession there is no natural "done"
@@ -45,9 +46,24 @@ const bootstrapTimeout = 15 * time.Second
 // Ed25519 identity key, needed for the Double Ratchet's Associated Data —
 // same two arguments ReceiveSession already takes for the same reason
 // (Fase 3).
-func WatchSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStream, sess *handshake.Session, localMachineID string, prekeys *x3dh.Store, localIdentityPub ed25519.PublicKey) error {
+//
+// auditLogDir, if non-empty, is where the Fase 6 operation log for this
+// session's root is opened (internal/auditlog); "" disables auditing. A
+// failure to open it is not fatal — the sync session runs without a log.
+func WatchSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStream, sess *handshake.Session, localMachineID string, prekeys *x3dh.Store, localIdentityPub ed25519.PublicKey, auditLogDir string) error {
 	if err := os.MkdirAll(sess.DestPath, 0o755); err != nil {
 		return fmt.Errorf("daemon: create watch root %s: %w", sess.DestPath, err)
+	}
+
+	var lg *auditlog.Logger
+	if auditLogDir != "" {
+		var lgErr error
+		lg, lgErr = auditlog.Open(auditLogDir, sess.DestPath, sess.ID)
+		if lgErr != nil {
+			fmt.Fprintf(os.Stderr, "jsyncd: watch session %s: open audit log: %v\n", sess.ID, lgErr)
+		} else {
+			defer lg.Close()
+		}
 	}
 
 	if _, err := fsnats.EnsureEventsStream(ctx, js, sess.ID); err != nil {
@@ -80,14 +96,14 @@ func WatchSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStream
 	versions := syncfs.NewVersionStore()
 
 	onConflict := func(ev syncfs.Event, conflictPath string) {
-		fmt.Fprintf(os.Stderr, "fileshared: watch session %s: conflict on %s, wrote %s — resolve manually\n", sess.ID, ev.RelPath, conflictPath)
+		fmt.Fprintf(os.Stderr, "jsyncd: watch session %s: conflict on %s, wrote %s — resolve manually\n", sess.ID, ev.RelPath, conflictPath)
 	}
 
 	// Fase 5 §1: converge with the initiator's side before this node's own
 	// Watcher starts — same call, same position in the startup sequence, as
-	// cmd/fileshare's cmdWatch (neither end of a Watcher session is
+	// cmd/jsync's cmdWatch (neither end of a Watcher session is
 	// privileged, see the package doc above).
-	if err := syncfs.Reconcile(ctx, js, cons, subject, localMachineID, sess.PeerMachineID, sess.DestPath, matcher, versions, echo, onConflict, enc); err != nil {
+	if err := syncfs.Reconcile(ctx, js, cons, subject, localMachineID, sess.PeerMachineID, sess.DestPath, matcher, versions, echo, onConflict, enc, lg); err != nil {
 		return fmt.Errorf("daemon: watch session %s: initial reconciliation: %w", sess.ID, err)
 	}
 
@@ -96,16 +112,16 @@ func WatchSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStream
 	changes, watchErrs := fw.Watch(ctx, sess.DestPath)
 	go func() {
 		for err := range watchErrs {
-			fmt.Fprintf(os.Stderr, "fileshared: watch session %s: local watch error: %v\n", sess.ID, err)
+			fmt.Fprintf(os.Stderr, "jsyncd: watch session %s: local watch error: %v\n", sess.ID, err)
 		}
 	}()
 
 	errCh := make(chan error, 2)
 	go func() {
-		errCh <- syncfs.PublishChanges(ctx, js, subject, localMachineID, sess.DestPath, changes, echo, versions, enc)
+		errCh <- syncfs.PublishChanges(ctx, js, subject, localMachineID, sess.DestPath, changes, echo, versions, enc, lg)
 	}()
 	go func() {
-		errCh <- syncfs.ReceiveChanges(ctx, cons, localMachineID, sess.DestPath, echo, versions, onConflict, enc)
+		errCh <- syncfs.ReceiveChanges(ctx, cons, localMachineID, sess.DestPath, echo, versions, onConflict, enc, lg)
 	}()
 
 	select {

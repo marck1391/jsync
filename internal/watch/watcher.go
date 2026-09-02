@@ -61,7 +61,7 @@ var ErrKernelBufferOverflow = errors.New("watch: OS notification buffer overflow
 
 // defaultSkipDirs is a placeholder exclusion list for common regenerable
 // noise (build artifacts, dependency caches, VCS metadata) — a stand-in
-// until internal/ignore's real .fileshareignore parsing exists (Fase 5).
+// until internal/ignore's real .jsyncignore parsing exists (Fase 5).
 // Directories in this list are never descended into and never reported.
 var defaultSkipDirs = map[string]bool{
 	".git":         true,
@@ -76,10 +76,10 @@ var defaultSkipDirs = map[string]bool{
 }
 
 // isSkippedDir also excludes Fase 4's own sandbox directories
-// (.fileshare_tmp_<session_id>) — an in-flight transfer's staging area
+// (.jsync_tmp_<session_id>) — an in-flight transfer's staging area
 // must never be picked up as source content by the watcher.
 func isSkippedDir(name string) bool {
-	return defaultSkipDirs[name] || strings.HasPrefix(name, ".fileshare_tmp_")
+	return defaultSkipDirs[name] || strings.HasPrefix(name, ".jsync_tmp_")
 }
 
 // rawAction is the platform-neutral action a backend reports for a path.
@@ -136,7 +136,7 @@ type fsWatcher struct {
 
 // NewFileWatcher returns a FileWatcher. debounce <= 0 uses DefaultDebounce;
 // bufferSize == 0 uses DefaultBufferSize. matcher may be nil, in which case
-// only the hardcoded defaultSkipDirs fast-path applies (no .fileshareignore
+// only the hardcoded defaultSkipDirs fast-path applies (no .jsyncignore
 // support) — every production caller should pass a real
 // internal/ignore.Matcher; nil exists mainly so tests that don't care about
 // exclusion don't need to construct one.

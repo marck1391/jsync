@@ -2,15 +2,15 @@ package nats
 
 import "fmt"
 
-// subjectPrefix roots the whole fileshare.* subject hierarchy shared by
+// subjectPrefix roots the whole jsync.* subject hierarchy shared by
 // Fase 1 (control), Fase 2 (stream/status), and Fase 5 (events).
-const subjectPrefix = "fileshare"
+const subjectPrefix = "jsync"
 
 // ActionHandshake is the control action Fase 1's challenge-response uses.
 const ActionHandshake = "handshake"
 
 // ControlSubject is where a Fase 1 Request for targetMachineID's action is
-// published: fileshare.control.<target_machine_id>.<action>.
+// published: jsync.control.<target_machine_id>.<action>.
 func ControlSubject(targetMachineID, action string) string {
 	return fmt.Sprintf("%s.control.%s.%s", subjectPrefix, targetMachineID, action)
 }

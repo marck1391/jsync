@@ -61,7 +61,7 @@ func EnsureStreamConsumer(ctx context.Context, js jetstream.JetStream, sessionID
 
 // StreamName is the JetStream stream name for sessionID's Fase 2 transfer.
 func StreamName(sessionID string) string {
-	return "FILESHARE_" + sessionID
+	return "JSYNC_" + sessionID
 }
 
 // EnsureEventsStream creates (or reuses) the JetStream stream backing a
@@ -111,7 +111,7 @@ func EnsureEventsConsumer(ctx context.Context, js jetstream.JetStream, sessionID
 // EventsStreamName is the JetStream stream name for sessionID's Fase 5
 // Watcher session.
 func EventsStreamName(sessionID string) string {
-	return "FILESHARE_EVENTS_" + sessionID
+	return "JSYNC_EVENTS_" + sessionID
 }
 
 // sanitizeConsumerName replaces characters NATS durable consumer names

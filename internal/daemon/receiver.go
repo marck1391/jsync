@@ -13,24 +13,24 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"filesharer/internal/crypto/ratchet"
-	"filesharer/internal/crypto/x3dh"
-	"filesharer/internal/handshake"
-	"filesharer/internal/pipeline"
-	fsnats "filesharer/internal/transport/nats"
+	"jsync/internal/crypto/ratchet"
+	"jsync/internal/crypto/x3dh"
+	"jsync/internal/handshake"
+	"jsync/internal/pipeline"
+	fsnats "jsync/internal/transport/nats"
 )
 
 // progressPublishInterval throttles how often ReceiveSession publishes an
 // intermediate Status while a transfer is in flight — time-based, not
 // per-file, so a tree of many small files doesn't flood
-// fileshare.status.<session_id> and a tree of a few huge files still
+// jsync.status.<session_id> and a tree of a few huge files still
 // reports something before the very end. A var, not a const, so a test can
 // shrink it to force a deterministic progress ping instead of a real
 // transfer needing to run past 500ms — same technique diskfull.go's
 // isDiskFull uses for the same reason.
 var progressPublishInterval = 500 * time.Millisecond
 
-// Status is the payload published to fileshare.status.<session_id> — most
+// Status is the payload published to jsync.status.<session_id> — most
 // messages during a transfer are progress pings (Final: false), and
 // exactly one is the terminal message (Final: true) that ends it, success
 // or failure (Fase 2 §5's status channel).
@@ -59,7 +59,7 @@ type Status struct {
 // the same peer to the same destPath (handshake.Responder.ResumeLookup)
 // can reclaim it and pick up where this one left off, skipping whatever
 // files were already fully received. resumes' own watchdog sweep
-// (cmd/fileshared) is what eventually deletes an abandoned sandbox no one
+// (cmd/jsyncd) is what eventually deletes an abandoned sandbox no one
 // ever comes back to reclaim.
 //
 // prekeys is this node's own X3DH material, used only if the sender turns
@@ -132,7 +132,7 @@ func ReceiveSession(ctx context.Context, conn *natsgo.Conn, js jetstream.JetStre
 		publishProgress()
 	}
 	onSkippedSymlink := func(relPath string, cause error) {
-		fmt.Fprintf(os.Stderr, "fileshared: session %s: skipped symlink %s (unsupported on this platform): %v\n", sess.ID, relPath, cause)
+		fmt.Fprintf(os.Stderr, "jsyncd: session %s: skipped symlink %s (unsupported on this platform): %v\n", sess.ID, relPath, cause)
 	}
 
 	pr, recvDone := pipeline.ReceiveArchive(ctx, consumer, associatedData, deriveChain, onTotalBytes)

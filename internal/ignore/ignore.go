@@ -15,11 +15,11 @@ import (
 // being synced isn't necessarily a git repo and its real .gitignore (if
 // any) may exclude things for reasons that have nothing to do with sync
 // (e.g. it might deliberately track node_modules).
-const FileName = ".fileshareignore"
+const FileName = ".jsyncignore"
 
-// DefaultPatterns are excluded even without a .fileshareignore present —
+// DefaultPatterns are excluded even without a .jsyncignore present —
 // the same regenerable-noise baseline internal/watch used to hardcode
-// directly before this package existed. A real .fileshareignore layers on
+// directly before this package existed. A real .jsyncignore layers on
 // top of these (including negating them with a leading '!'), it doesn't
 // replace them.
 var DefaultPatterns = []string{
@@ -32,8 +32,8 @@ var DefaultPatterns = []string{
 	"vendor/",
 	"dist/",
 	"build/",
-	".fileshare_tmp_*/", // Fase 4's atomic-commit sandbox — never source content
-	".fileshare/",       // internal/config's default home for identity/prekeys/authorized_clients — see config.defaults(); never source content, and never something you want a peer receiving
+	".jsync_tmp_*/", // Fase 4's atomic-commit sandbox — never source content
+	".jsync/",       // internal/config's default home for identity/prekeys/authorized_clients — see config.defaults(); never source content, and never something you want a peer receiving
 }
 
 // Matcher decides whether a root-relative, slash-separated path should be
@@ -43,19 +43,19 @@ type Matcher struct {
 	gi *gitignore.GitIgnore
 }
 
-// Load reads root's .fileshareignore (gitignore syntax) if present and
-// compiles it together with DefaultPatterns. A missing .fileshareignore is
+// Load reads root's .jsyncignore (gitignore syntax) if present and
+// compiles it together with DefaultPatterns. A missing .jsyncignore is
 // not an error — it just means DefaultPatterns alone.
 //
-// If root exists but isn't a directory (Fase 2's `fileshare share`
+// If root exists but isn't a directory (Fase 2's `jsync share`
 // supports sharing a single file directly, not just a directory tree),
-// there's no directory to look inside for a .fileshareignore, so
+// there's no directory to look inside for a .jsyncignore, so
 // DefaultPatterns alone applies — checked via an explicit os.Stat rather
 // than just letting the os.ReadFile below fail and treating any error as
 // "not present": on Linux, filepath.Join(root, FileName) where root is a
 // file resolves as ENOTDIR, which errors.Is(err, os.ErrNotExist) does
 // *not* recognize (only ENOENT does) — confirmed on a real Linux VM, this
-// would otherwise hard-fail `fileshare share` on a single file there,
+// would otherwise hard-fail `jsync share` on a single file there,
 // while happening to work on Windows by coincidence of a different
 // underlying error.
 func Load(root string) (*Matcher, error) {
@@ -87,7 +87,7 @@ func Load(root string) (*Matcher, error) {
 // appended. go-gitignore's MatchesPath only recognizes a directory-only
 // pattern (one ending in "/", like every entry in DefaultPatterns) against
 // a query that itself ends in "/" — confirmed directly against the
-// library: a bare directory name like ".fileshare" silently fails to
+// library: a bare directory name like ".jsync" silently fails to
 // match its own directory-only pattern, even though every file underneath
 // it (which always has a "/" somewhere in its relPath) matches correctly.
 // Without this, a caller relying on Match's result to skip descending into

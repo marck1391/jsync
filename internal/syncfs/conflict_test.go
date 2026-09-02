@@ -12,8 +12,8 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"filesharer/internal/syncfs"
-	fsnats "filesharer/internal/transport/nats"
+	"jsync/internal/syncfs"
+	fsnats "jsync/internal/transport/nats"
 )
 
 // TestConflictDetectionWritesAsideInsteadOfOverwriting drives the full
@@ -76,7 +76,7 @@ func TestConflictDetectionWritesAsideInsteadOfOverwriting(t *testing.T) {
 	versions := syncfs.NewVersionStore()
 	done := make(chan error, 1)
 	go func() {
-		done <- syncfs.ReceiveChanges(ctx, cons, "node-observer", destRoot, echo, versions, onConflict, nil)
+		done <- syncfs.ReceiveChanges(ctx, cons, "node-observer", destRoot, echo, versions, onConflict, nil, nil)
 	}()
 
 	// Wait for both the winner file and a conflict file to show up.

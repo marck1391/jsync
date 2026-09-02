@@ -10,8 +10,8 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"filesharer/internal/syncfs"
-	fsnats "filesharer/internal/transport/nats"
+	"jsync/internal/syncfs"
+	fsnats "jsync/internal/transport/nats"
 )
 
 // TestReconcileConverges drives Fase 5 §1's initial reconciliation between
@@ -19,7 +19,7 @@ import (
 // has a file unique to it, plus a file both already agree on. Reconcile
 // must fill in each side's gap (union semantics) without touching the file
 // they already agree on, and must do so symmetrically — both sides call
-// Reconcile the same way, at the same time, exactly as cmd/fileshare and
+// Reconcile the same way, at the same time, exactly as cmd/jsync and
 // internal/daemon.WatchSession do.
 func TestReconcileConverges(t *testing.T) {
 	node := bootstrapTestNode(t)
@@ -59,11 +59,11 @@ func TestReconcileConverges(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		errs <- syncfs.Reconcile(ctx, js, consA, subject, "node-a", "node-b", rootA, nil, syncfs.NewVersionStore(), syncfs.NewEchoGuard(), nil, nil)
+		errs <- syncfs.Reconcile(ctx, js, consA, subject, "node-a", "node-b", rootA, nil, syncfs.NewVersionStore(), syncfs.NewEchoGuard(), nil, nil, nil)
 	}()
 	go func() {
 		defer wg.Done()
-		errs <- syncfs.Reconcile(ctx, js, consB, subject, "node-b", "node-a", rootB, nil, syncfs.NewVersionStore(), syncfs.NewEchoGuard(), nil, nil)
+		errs <- syncfs.Reconcile(ctx, js, consB, subject, "node-b", "node-a", rootB, nil, syncfs.NewVersionStore(), syncfs.NewEchoGuard(), nil, nil, nil)
 	}()
 	wg.Wait()
 	close(errs)
@@ -133,11 +133,11 @@ func TestReconcileConflict(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		errs <- syncfs.Reconcile(ctx, js, consA, subject, "node-a", "node-b", rootA, nil, syncfs.NewVersionStore(), syncfs.NewEchoGuard(), onConflictA, nil)
+		errs <- syncfs.Reconcile(ctx, js, consA, subject, "node-a", "node-b", rootA, nil, syncfs.NewVersionStore(), syncfs.NewEchoGuard(), onConflictA, nil, nil)
 	}()
 	go func() {
 		defer wg.Done()
-		errs <- syncfs.Reconcile(ctx, js, consB, subject, "node-b", "node-a", rootB, nil, syncfs.NewVersionStore(), syncfs.NewEchoGuard(), onConflictB, nil)
+		errs <- syncfs.Reconcile(ctx, js, consB, subject, "node-b", "node-a", rootB, nil, syncfs.NewVersionStore(), syncfs.NewEchoGuard(), onConflictB, nil, nil)
 	}()
 	wg.Wait()
 	close(errs)

@@ -4,16 +4,16 @@ import (
 	"encoding/binary"
 	"time"
 
-	"filesharer/internal/crypto/x3dh"
+	"jsync/internal/crypto/x3dh"
 )
 
 // ProtocolVersion is checked first in a handshake (Fase 1 §3 step 1) so an
 // incompatible pair of nodes fails fast, before spending any cycles on
 // cryptography.
-const ProtocolVersion = 1
+const ProtocolVersion = 2
 
 // Request is the challenge sent by the initiating node to
-// fileshare.control.<target_machine_id>.handshake (Fase 1 §3 step 1).
+// jsync.control.<target_machine_id>.handshake (Fase 1 §3 step 1).
 type Request struct {
 	ProtocolVersion int       `json:"protocol_version"`
 	MachineID       string    `json:"machine_id"`
@@ -95,9 +95,9 @@ const (
 // Params are the agreed-upon session parameters the responder hands back
 // (Fase 1 §3 step 3): constraints the initiator must respect.
 type Params struct {
-	MaxPayloadBytes int64     `json:"max_payload_bytes"`
-	AllowedDestPath string    `json:"allowed_dest_path"`
-	Direction       Direction `json:"direction"`
+	MaxPayloadBytes  int64     `json:"max_payload_bytes"`
+	AllowedDestPaths []string  `json:"allowed_dest_paths,omitempty"`
+	Direction        Direction `json:"direction"`
 	// Encrypt mirrors Request.RequestedEncrypt (Responder.Handle copies it
 	// straight through, same as Direction) — internal/daemon.WatchSession
 	// reads this to decide whether to run the Fase 3 bootstrap dance before

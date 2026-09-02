@@ -13,7 +13,8 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"filesharer/internal/watch"
+	"jsync/internal/auditlog"
+	"jsync/internal/watch"
 )
 
 // ManifestEntry is one regular file's content identity for Fase 5 §1's
@@ -135,12 +136,13 @@ func publishReconcileDone(ctx context.Context, js jetstream.JetStream, subject, 
 // included, so a genuine content conflict with whatever the peer
 // independently pushes for the same path is caught the same way a live
 // concurrent edit would be — see Reconcile's doc comment).
-func pushReconciled(ctx context.Context, js jetstream.JetStream, subject, machineID, root, relPath string, versions *VersionStore, enc *Encryption) error {
+func pushReconciled(ctx context.Context, js jetstream.JetStream, subject, machineID, root, relPath string, versions *VersionStore, enc *Encryption, lg *auditlog.Logger) error {
 	data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(relPath)))
 	if err != nil {
 		return nil // vanished since the manifest scan — nothing to push
 	}
 	hash := ContentHash(data)
+	plainLen := int64(len(data))
 	version := versions.Bump(relPath, machineID)
 	ev := Event{Origin: machineID, Op: OpWrite, RelPath: relPath, ContentHash: hash, Data: data, Version: version}
 	if enc != nil {
@@ -151,14 +153,22 @@ func pushReconciled(ctx context.Context, js jetstream.JetStream, subject, machin
 		ev.Data = ciphertext
 		ev.Seq = seq
 	}
-	return publish(ctx, js, subject, ev)
+	opID, err := publishAck(ctx, js, subject, ev)
+	if err != nil {
+		return err
+	}
+	lg.Log(auditlog.Record{
+		OpID: opID, Dir: "out", Origin: machineID, Op: string(OpWrite),
+		RelPath: relPath, ContentHash: hash, Bytes: plainLen, Outcome: "reconciled",
+	})
+	return nil
 }
 
 // Reconcile runs Fase 5 §1's initial reconciliation: both sides scan their
 // own root, exchange manifests, and each pushes whatever the other side is
 // missing or stale on — before either side's live watch.FileWatcher (and
 // PublishChanges/ReceiveChanges) starts. Symmetric: both the initiator
-// (cmd/fileshare) and the responder (internal/daemon.WatchSession) call
+// (cmd/jsync) and the responder (internal/daemon.WatchSession) call
 // this exact function the same way, in the same place in their startup
 // sequence — right after any Fase 3 bootstrap, right before starting their
 // own watch.FileWatcher — so no live change can arrive while reconciliation
@@ -180,7 +190,10 @@ func pushReconciled(ctx context.Context, js jetstream.JetStream, subject, machin
 // enc, if non-nil, must already be fully established (both chains derived)
 // — same requirement PublishChanges/ReceiveChanges document. onConflict, if
 // non-nil, is called for every conflict Reconcile itself resolves this way.
-func Reconcile(ctx context.Context, js jetstream.JetStream, cons jetstream.Consumer, subject, machineID, peerMachineID, root string, matcher watch.PathMatcher, versions *VersionStore, echo *EchoGuard, onConflict func(ev Event, conflictPath string), enc *Encryption) error {
+// lg, if non-nil, records the mutations reconciliation pushes and applies
+// (Fase 6 / auditlog); a push is logged with outcome "reconciled", an
+// inbound apply goes through applyEvent exactly like a live one.
+func Reconcile(ctx context.Context, js jetstream.JetStream, cons jetstream.Consumer, subject, machineID, peerMachineID, root string, matcher watch.PathMatcher, versions *VersionStore, echo *EchoGuard, onConflict func(ev Event, conflictPath string), enc *Encryption, lg *auditlog.Logger) error {
 	local, err := ScanManifest(root, matcher)
 	if err != nil {
 		return fmt.Errorf("syncfs: reconcile: scan local: %w", err)
@@ -194,7 +207,7 @@ func Reconcile(ctx context.Context, js jetstream.JetStream, cons jetstream.Consu
 	}
 
 	for _, relPath := range diffPaths(local, peer) {
-		if err := pushReconciled(ctx, js, subject, machineID, root, relPath, versions, enc); err != nil {
+		if err := pushReconciled(ctx, js, subject, machineID, root, relPath, versions, enc, lg); err != nil {
 			return fmt.Errorf("syncfs: reconcile: push %s: %w", relPath, err)
 		}
 	}
@@ -202,7 +215,7 @@ func Reconcile(ctx context.Context, js jetstream.JetStream, cons jetstream.Consu
 		return fmt.Errorf("syncfs: reconcile: publish done: %w", err)
 	}
 
-	return drainUntilReconcileDone(ctx, cons, machineID, peerMachineID, root, echo, versions, onConflict, enc)
+	return drainUntilReconcileDone(ctx, cons, machineID, peerMachineID, root, echo, versions, onConflict, enc, lg)
 }
 
 // drainUntilReconcileDone applies every peer-originated OpWrite it sees
@@ -210,7 +223,7 @@ func Reconcile(ctx context.Context, js jetstream.JetStream, cons jetstream.Consu
 // uses) until peerMachineID's OpReconcileDone arrives, then returns. This
 // node's own echoed-back OpManifest/OpWrite/OpReconcileDone messages are
 // skipped like any other self-origin message.
-func drainUntilReconcileDone(ctx context.Context, cons jetstream.Consumer, machineID, peerMachineID, destRoot string, echo *EchoGuard, versions *VersionStore, onConflict func(Event, string), enc *Encryption) error {
+func drainUntilReconcileDone(ctx context.Context, cons jetstream.Consumer, machineID, peerMachineID, destRoot string, echo *EchoGuard, versions *VersionStore, onConflict func(Event, string), enc *Encryption, lg *auditlog.Logger) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -252,7 +265,11 @@ func drainUntilReconcileDone(ctx context.Context, cons jetstream.Consumer, machi
 				}
 				ev.Data = plaintext
 			}
-			if err := applyEvent(ev, destRoot, echo, versions, onConflict); err != nil {
+			var opID uint64
+			if meta, metaErr := msg.Metadata(); metaErr == nil {
+				opID = meta.Sequence.Stream
+			}
+			if err := applyEvent(ev, destRoot, echo, versions, onConflict, opID, lg); err != nil {
 				_ = msg.Nak()
 				return err
 			}

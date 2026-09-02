@@ -6,9 +6,9 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 
-	"filesharer/internal/crypto/x3dh"
-	"filesharer/internal/handshake"
-	"filesharer/internal/identity"
+	"jsync/internal/crypto/x3dh"
+	"jsync/internal/handshake"
+	"jsync/internal/identity"
 )
 
 func TestServeAndRequestHandshakeOverNATS(t *testing.T) {
@@ -42,8 +42,8 @@ func TestServeAndRequestHandshakeOverNATS(t *testing.T) {
 		Prekeys:    prekeys,
 		Guard:      handshake.NewReplayGuard(),
 		DefaultParams: handshake.Params{
-			MaxPayloadBytes: 1 << 20,
-			AllowedDestPath: "/home/user/workspace",
+			MaxPayloadBytes:  1 << 20,
+			AllowedDestPaths: []string{"/home/user/workspace"},
 		},
 	}
 

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"filesharer/internal/crypto/x3dh"
-	"filesharer/internal/identity"
+	"jsync/internal/crypto/x3dh"
+	"jsync/internal/identity"
 )
 
 // Responder runs the full Fase 1 §3 flow on the receiving side: validate,
@@ -63,10 +63,10 @@ func (r *Responder) Handle(req *Request) *Response {
 		return &Response{Approved: false, Reason: err.Error()}
 	}
 
-	if r.DefaultParams.AllowedDestPath != "" && !pathWithinRoot(r.DefaultParams.AllowedDestPath, req.RequestedDestPath) {
+	if len(r.DefaultParams.AllowedDestPaths) > 0 && !anyPathWithinRoot(r.DefaultParams.AllowedDestPaths, req.RequestedDestPath) {
 		return &Response{
 			Approved: false,
-			Reason:   fmt.Sprintf("requested_dest_path %q is outside the allowed root %q", req.RequestedDestPath, r.DefaultParams.AllowedDestPath),
+			Reason:   fmt.Sprintf("requested_dest_path %q is outside every allowed root %v", req.RequestedDestPath, r.DefaultParams.AllowedDestPaths),
 		}
 	}
 
@@ -95,6 +95,17 @@ func (r *Responder) Handle(req *Request) *Response {
 		Bundle:       r.Prekeys.Bundle(),
 		ResumedFiles: resumed,
 	}
+}
+
+// anyPathWithinRoot reports whether target sits within at least one of
+// roots — the multi-root form of the allowed-destination check.
+func anyPathWithinRoot(roots []string, target string) bool {
+	for _, root := range roots {
+		if root != "" && pathWithinRoot(root, target) {
+			return true
+		}
+	}
+	return false
 }
 
 // pathWithinRoot reports whether target is root itself or nested under it,
