@@ -44,11 +44,12 @@ type subcommand struct {
 }
 
 var subcommands = []subcommand{
-	{"share", "jsync share [--config path] <local-path> <target-machine-id>:<dest-path>", cmdShare},
+	{"share", "jsync share [--config path] <local-path> <node|machine-id>:<dest-path>", cmdShare},
 	{"pull", "jsync pull <target-machine-id>:<path> <dest>", blockedOnPhase("Fase 2 (motor de streaming)")},
-	{"watch", "jsync watch [--config path] <local-path> <target-machine-id>:<dest-path>", cmdWatch},
+	{"watch", "jsync watch [--config path] <local-path> <node|machine-id>:<dest-path>", cmdWatch},
 	{"log", "jsync log [--config path] [--session id] [--path substr] [--since when] [--json] [--files] [root]", cmdLog},
 	{"allow", "jsync allow [--config path] <dest-path> | jsync allow --remove <dest-path> | jsync allow --list", cmdAllow},
+	{"node", "jsync node add <alias> <machine-id> | jsync node rm <alias> | jsync node ls", cmdNode},
 	{"resolve", "jsync resolve <conflict-file>", blockedOnPhase("Fase 5 (conflictos)")},
 	{"keys", "jsync keys [--config path] generate|show|authorize <base64-pubkey>", cmdKeys},
 }
@@ -272,13 +273,13 @@ func cmdShare(args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) != 2 {
-		return fmt.Errorf("usage: jsync share [--config path] <local-path> <target-machine-id>:<dest-path>")
+		return fmt.Errorf("usage: jsync share [--config path] <local-path> <node|machine-id>:<dest-path>")
 	}
 	srcPath, target := rest[0], rest[1]
 
-	targetMachineID, destPath, ok := strings.Cut(target, ":")
-	if !ok || targetMachineID == "" || destPath == "" {
-		return fmt.Errorf("target must be <machine-id>:<dest-path>, got %q", target)
+	targetName, destPath, ok := strings.Cut(target, ":")
+	if !ok || targetName == "" || destPath == "" {
+		return fmt.Errorf("target must be <node|machine-id>:<dest-path>, got %q", target)
 	}
 	if _, err := os.Stat(srcPath); err != nil {
 		return fmt.Errorf("local path: %w", err)
@@ -288,6 +289,7 @@ func cmdShare(args []string) error {
 	if err != nil {
 		return err
 	}
+	targetMachineID := cfg.ResolveNode(targetName)
 
 	// jsync is a short-lived client of the jsyncd daemon already
 	// running on this machine (Fase 4) — it connects directly to that
@@ -485,13 +487,13 @@ func cmdWatch(args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) != 2 {
-		return fmt.Errorf("usage: jsync watch [--config path] <local-path> <target-machine-id>:<dest-path>")
+		return fmt.Errorf("usage: jsync watch [--config path] <local-path> <node|machine-id>:<dest-path>")
 	}
 	localPath, target := rest[0], rest[1]
 
-	targetMachineID, destPath, ok := strings.Cut(target, ":")
-	if !ok || targetMachineID == "" || destPath == "" {
-		return fmt.Errorf("target must be <machine-id>:<dest-path>, got %q", target)
+	targetName, destPath, ok := strings.Cut(target, ":")
+	if !ok || targetName == "" || destPath == "" {
+		return fmt.Errorf("target must be <node|machine-id>:<dest-path>, got %q", target)
 	}
 	info, err := os.Stat(localPath)
 	if err != nil {
@@ -505,6 +507,7 @@ func cmdWatch(args []string) error {
 	if err != nil {
 		return err
 	}
+	targetMachineID := cfg.ResolveNode(targetName)
 
 	brokerURL := fmt.Sprintf("nats://%s:%d", cfg.Host, cfg.Port)
 	conn, err := natsgo.Connect(brokerURL)

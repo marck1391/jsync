@@ -66,6 +66,13 @@ type Config struct {
 	LeafNodePort   int    `yaml:"leaf_node_port"`
 	HubLeafNodeURL string `yaml:"hub_leaf_node_url"`
 
+	// Nodes maps a friendly alias to a peer's machine_id, so
+	// `jsync share ./x vm-01:/dest` works instead of pasting a raw
+	// machine_id. Only affects how the local CLI addresses a target — it is
+	// not exchanged with anyone and does not grant trust (that stays in
+	// authorized_clients). `jsync node add/rm/ls` edit this key in place.
+	Nodes map[string]string `yaml:"nodes"`
+
 	JetStreamStoreDir string `yaml:"jetstream_store_dir"`
 	MaxPayloadBytes   int64  `yaml:"max_payload_bytes"`
 
@@ -219,6 +226,16 @@ func (c *Config) resolvePaths(configPath string) {
 			*p = filepath.Join(base, *p)
 		}
 	}
+}
+
+// ResolveNode returns the machine_id for a target: the alias's mapping if
+// name is a known node alias, otherwise name unchanged (so raw machine_ids
+// keep working).
+func (c *Config) ResolveNode(name string) string {
+	if id, ok := c.Nodes[name]; ok && id != "" {
+		return id
+	}
+	return name
 }
 
 func (c *Config) validate() error {

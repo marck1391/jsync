@@ -127,6 +127,36 @@ debug: true
 	}
 }
 
+func TestNodeAliases(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "jsync.yaml")
+	contents := "nodes:\n  hub: HUB-abc123\n  vm-01: VM-def456\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.ResolveNode("vm-01") != "VM-def456" {
+		t.Errorf("ResolveNode(vm-01) = %q, want VM-def456", cfg.ResolveNode("vm-01"))
+	}
+	if cfg.ResolveNode("hub") != "HUB-abc123" {
+		t.Errorf("ResolveNode(hub) = %q, want HUB-abc123", cfg.ResolveNode("hub"))
+	}
+	// An unknown name (or a raw machine_id) passes through unchanged.
+	if cfg.ResolveNode("SOME-raw-id") != "SOME-raw-id" {
+		t.Errorf("ResolveNode passthrough failed: %q", cfg.ResolveNode("SOME-raw-id"))
+	}
+}
+
+func TestResolveNodeNilMap(t *testing.T) {
+	var c Config
+	if c.ResolveNode("anything") != "anything" {
+		t.Error("ResolveNode on a nil Nodes map should pass the name through")
+	}
+}
+
 func TestLoadPeerWithoutHubURLFails(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("role: peer\n"), 0o600); err != nil {

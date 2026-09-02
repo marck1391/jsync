@@ -19,7 +19,7 @@ SSH-style Ed25519 identity handshake and optional end-to-end encryption
 </p>
 
 ```
-# one-shot copy, like scp
+# one-shot copy, like scp   (vm-01 is an alias you set once with `jsync node add`)
 jsync share ./build vm-01:/srv/artifacts
 
 # live two-way sync, like rsync -w / a shared volume — without the polling
@@ -157,18 +157,31 @@ jsync keys authorize <PEER_PUBLIC_KEY>
 jsync keys authorize <HUB_PUBLIC_KEY>
 ```
 
-### 4. Transfer / sync
+### 4. Name the other side (optional but nicer)
+
+Instead of pasting `machine_id`s everywhere, give them aliases:
+
+```bash
+# on the hub
+jsync node add vm-01 <PEER_MACHINE_ID>
+# on the peer
+jsync node add hub <HUB_MACHINE_ID>
+```
+
+### 5. Transfer / sync
 
 ```bash
 # from the hub: one-shot copy into the peer's allowed root
-jsync share ./release <PEER_ID>:/srv/inbox/release
+jsync share ./release vm-01:/srv/inbox/release
 
 # live two-way sync
-jsync watch ./project <PEER_ID>:/srv/inbox/project
+jsync watch ./project vm-01:/srv/inbox/project
 
 # encrypted (broker sees only ciphertext)
-jsync share --encrypt ./secrets <PEER_ID>:/srv/inbox/secrets
+jsync share --encrypt ./secrets vm-01:/srv/inbox/secrets
 ```
+
+A raw `machine_id` still works anywhere an alias does.
 
 > On the same host, `jsync` and `jsyncd` share one `jsync.yaml`; the client connects to
 > the daemon already listening on `host:port`.
@@ -181,11 +194,14 @@ jsync share --encrypt ./secrets <PEER_ID>:/srv/inbox/secrets
 |---|---|
 | `jsync keys show` | Print this node's `machine_id` and base64 public key. |
 | `jsync keys authorize <base64-pubkey>` | Trust a peer's key (appends to `authorized_clients`). |
-| `jsync share [flags] <local-path> <machine-id>:<dest-path>` | One-shot copy of a file or directory. |
-| `jsync watch [flags] <local-dir> <machine-id>:<dest-dir>` | Live bidirectional sync until `Ctrl+C`. |
+| `jsync node add <alias> <machine-id>` · `rm <alias>` · `ls` | Manage friendly names for peers in the config's `nodes:` map (edited in place, comments preserved). |
+| `jsync share [flags] <local-path> <node\|machine-id>:<dest-path>` | One-shot copy of a file or directory. A single file lands as `<dest-path>/<filename>` (dest is treated as a directory). |
+| `jsync watch [flags] <local-dir> <node\|machine-id>:<dest-dir>` | Live bidirectional sync until `Ctrl+C`. |
 | `jsync allow <path>` · `--remove <path>` · `--list` | Add / drop / list `allowed_dest_paths` in the config file (edited in place, comments preserved). |
 | `jsync log [flags] [root]` | Show the mirrored-operation audit log. |
 | `jsync pull`, `jsync resolve` | Not implemented yet. |
+
+Targets accept a `nodes:` alias or a raw `machine_id`, interchangeably.
 
 **`share` flags:** `--config`, `--encrypt`, `--timeout` (10s), `--transfer-timeout` (2m),
 `--retries` (2, auto-resumes), `--retry-wait` (3s).
@@ -226,6 +242,10 @@ host: 127.0.0.1           # NATS client listen/connect address
 port: 4222
 leaf_node_port: 7422      # hub only — where peers attach
 hub_leaf_node_url: ""     # peer only — REQUIRED for role: peer, e.g. nats://hub:7422
+
+nodes:                    # friendly aliases for `share` / `watch` targets.
+  hub: HUB-machineid      # local addressing only — not sent anywhere, grants no trust.
+  vm-01: VM-machineid     # managed with `jsync node add/rm/ls`.
 
 one_time_prekey_count: 10 # X3DH one-time prekeys kept in the pool
 max_payload_bytes: 1048576
