@@ -13,8 +13,8 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"jsync/internal/auditlog"
-	"jsync/internal/watch"
+	"github.com/marck1391/jsync/internal/auditlog"
+	"github.com/marck1391/jsync/internal/watch"
 )
 
 // ManifestEntry is one regular file's content identity for Fase 5 §1's

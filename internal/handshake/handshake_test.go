@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"jsync/internal/crypto/x3dh"
-	"jsync/internal/identity"
+	"github.com/marck1391/jsync/internal/crypto/x3dh"
+	"github.com/marck1391/jsync/internal/identity"
 )
 
 func newTestResponder(t *testing.T, trust *identity.Identity) (*Responder, *identity.Identity) {

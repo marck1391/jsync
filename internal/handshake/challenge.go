@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"jsync/internal/identity"
+	"github.com/marck1391/jsync/internal/identity"
 )
 
 // ClockSkew is the maximum allowed difference between a Request's Timestamp

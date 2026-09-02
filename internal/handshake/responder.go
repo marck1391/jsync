@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"jsync/internal/crypto/x3dh"
-	"jsync/internal/identity"
+	"github.com/marck1391/jsync/internal/crypto/x3dh"
+	"github.com/marck1391/jsync/internal/identity"
 )
 
 // Responder runs the full Fase 1 §3 flow on the receiving side: validate,

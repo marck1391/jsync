@@ -16,13 +16,13 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"jsync/internal/config"
-	"jsync/internal/crypto/x3dh"
-	"jsync/internal/daemon"
-	"jsync/internal/handshake"
-	"jsync/internal/identity"
-	"jsync/internal/pipeline"
-	fsnats "jsync/internal/transport/nats"
+	"github.com/marck1391/jsync/internal/config"
+	"github.com/marck1391/jsync/internal/crypto/x3dh"
+	"github.com/marck1391/jsync/internal/daemon"
+	"github.com/marck1391/jsync/internal/handshake"
+	"github.com/marck1391/jsync/internal/identity"
+	"github.com/marck1391/jsync/internal/pipeline"
+	fsnats "github.com/marck1391/jsync/internal/transport/nats"
 )
 
 // prekeySaveInterval bounds how long a crash (not a graceful shutdown,

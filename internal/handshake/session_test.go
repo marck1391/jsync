@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"jsync/internal/identity"
+	"github.com/marck1391/jsync/internal/identity"
 )
 
 func TestSessionStoreCreateGet(t *testing.T) {

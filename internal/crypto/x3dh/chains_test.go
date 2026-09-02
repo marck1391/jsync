@@ -6,7 +6,7 @@ import (
 	"crypto/rand"
 	"testing"
 
-	"jsync/internal/crypto/ratchet"
+	"github.com/marck1391/jsync/internal/crypto/ratchet"
 )
 
 // TestBidirectionalChains derives the pair of directional chains Fase 5's

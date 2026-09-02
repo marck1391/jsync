@@ -12,14 +12,14 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"jsync/internal/auditlog"
-	"jsync/internal/crypto/ratchet"
-	"jsync/internal/crypto/x3dh"
-	"jsync/internal/handshake"
-	"jsync/internal/ignore"
-	"jsync/internal/syncfs"
-	fsnats "jsync/internal/transport/nats"
-	"jsync/internal/watch"
+	"github.com/marck1391/jsync/internal/auditlog"
+	"github.com/marck1391/jsync/internal/crypto/ratchet"
+	"github.com/marck1391/jsync/internal/crypto/x3dh"
+	"github.com/marck1391/jsync/internal/handshake"
+	"github.com/marck1391/jsync/internal/ignore"
+	"github.com/marck1391/jsync/internal/syncfs"
+	fsnats "github.com/marck1391/jsync/internal/transport/nats"
+	"github.com/marck1391/jsync/internal/watch"
 )
 
 // bootstrapTimeout bounds how long an encrypted WatchSession waits for the

@@ -7,8 +7,8 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 
-	"jsync/internal/handshake"
-	"jsync/internal/identity"
+	"github.com/marck1391/jsync/internal/handshake"
+	"github.com/marck1391/jsync/internal/identity"
 )
 
 // ServeHandshake subscribes to this node's jsync.control.<machineID>.

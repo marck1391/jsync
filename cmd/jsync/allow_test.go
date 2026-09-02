@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"jsync/internal/config"
+	"github.com/marck1391/jsync/internal/config"
 )
 
 func TestEditAllowedDestPathsCreatesFile(t *testing.T) {

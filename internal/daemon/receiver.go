@@ -13,11 +13,11 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"jsync/internal/crypto/ratchet"
-	"jsync/internal/crypto/x3dh"
-	"jsync/internal/handshake"
-	"jsync/internal/pipeline"
-	fsnats "jsync/internal/transport/nats"
+	"github.com/marck1391/jsync/internal/crypto/ratchet"
+	"github.com/marck1391/jsync/internal/crypto/x3dh"
+	"github.com/marck1391/jsync/internal/handshake"
+	"github.com/marck1391/jsync/internal/pipeline"
+	fsnats "github.com/marck1391/jsync/internal/transport/nats"
 )
 
 // progressPublishInterval throttles how often ReceiveSession publishes an

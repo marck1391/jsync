@@ -1,9 +1,3 @@
-<!--
-  Repo URL / module path: this README assumes you publish at
-  github.com/marck1391/jsync. Adjust the URLs below and `go.mod`
-  (`module jsync` -> `module github.com/<owner>/jsync`) if that differs.
--->
-
 <p align="center">
   <img src="jsync.png" alt="jsync" width="440">
 </p>
@@ -119,9 +113,6 @@ go build -o jsyncd ./cmd/jsyncd
 ```
 
 ### `go install`
-
-Works once `go.mod`'s module path is the repo URL
-(`module github.com/<owner>/jsync`):
 
 ```bash
 go install github.com/marck1391/jsync/cmd/jsync@latest

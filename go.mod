@@ -1,4 +1,4 @@
-module jsync
+module github.com/marck1391/jsync
 
 go 1.26.2
 

@@ -11,7 +11,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"gopkg.in/yaml.v3"
 
-	"jsync/internal/config"
+	"github.com/marck1391/jsync/internal/config"
 )
 
 // cmdAllow edits the `allowed_dest_paths` list in the jsync config file:

@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"jsync/internal/handshake"
+	"github.com/marck1391/jsync/internal/handshake"
 )
 
 // resumeGracePeriod is how long a parked sandbox survives without being

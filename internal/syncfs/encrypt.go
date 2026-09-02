@@ -7,7 +7,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"jsync/internal/crypto/ratchet"
+	"github.com/marck1391/jsync/internal/crypto/ratchet"
 )
 
 // Encryption bundles what PublishChanges/ReceiveChanges need to run a Fase

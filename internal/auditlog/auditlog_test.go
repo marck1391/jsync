@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"jsync/internal/auditlog"
+	"github.com/marck1391/jsync/internal/auditlog"
 )
 
 func TestOpenLogAndListRoundTrip(t *testing.T) {

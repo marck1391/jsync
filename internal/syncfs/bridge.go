@@ -9,8 +9,8 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"jsync/internal/auditlog"
-	"jsync/internal/watch"
+	"github.com/marck1391/jsync/internal/auditlog"
+	"github.com/marck1391/jsync/internal/watch"
 )
 
 // eventFetchTimeout bounds how long ReceiveChanges blocks per Fetch call.

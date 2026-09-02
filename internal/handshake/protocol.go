@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"time"
 
-	"jsync/internal/crypto/x3dh"
+	"github.com/marck1391/jsync/internal/crypto/x3dh"
 )
 
 // ProtocolVersion is checked first in a handshake (Fase 1 §3 step 1) so an

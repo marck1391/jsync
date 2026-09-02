@@ -10,7 +10,7 @@ import (
 
 	"golang.org/x/crypto/hkdf"
 
-	"jsync/internal/crypto/ratchet"
+	"github.com/marck1391/jsync/internal/crypto/ratchet"
 )
 
 const (

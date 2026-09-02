@@ -12,7 +12,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"jsync/internal/crypto/ratchet"
+	"github.com/marck1391/jsync/internal/crypto/ratchet"
 )
 
 // Chunk headers (Fase 2 §2 step 4). The four Bootstrap* headers only ever

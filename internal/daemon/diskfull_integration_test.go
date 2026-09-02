@@ -10,11 +10,11 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"jsync/internal/crypto/x3dh"
-	"jsync/internal/handshake"
-	"jsync/internal/identity"
-	"jsync/internal/pipeline"
-	fsnats "jsync/internal/transport/nats"
+	"github.com/marck1391/jsync/internal/crypto/x3dh"
+	"github.com/marck1391/jsync/internal/handshake"
+	"github.com/marck1391/jsync/internal/identity"
+	"github.com/marck1391/jsync/internal/pipeline"
+	fsnats "github.com/marck1391/jsync/internal/transport/nats"
 )
 
 // TestReceiveSessionAbortsInsteadOfParkingOnDiskFull is the integration

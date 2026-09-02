@@ -11,9 +11,9 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 
-	"jsync/internal/syncfs"
-	fsnats "jsync/internal/transport/nats"
-	"jsync/internal/watch"
+	"github.com/marck1391/jsync/internal/syncfs"
+	fsnats "github.com/marck1391/jsync/internal/transport/nats"
+	"github.com/marck1391/jsync/internal/watch"
 )
 
 func bootstrapTestNode(t *testing.T) *fsnats.Node {

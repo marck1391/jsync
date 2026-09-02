@@ -10,7 +10,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"jsync/internal/config"
+	"github.com/marck1391/jsync/internal/config"
 )
 
 // cmdNode manages the `nodes:` alias map in the jsync config file — friendly
