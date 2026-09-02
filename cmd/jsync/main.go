@@ -281,6 +281,14 @@ func cmdShare(args []string) error {
 	if !ok || targetName == "" || destPath == "" {
 		return fmt.Errorf("target must be <node|machine-id>:<dest-path>, got %q", target)
 	}
+	origDest := destPath
+	destPath, err := resolveDestPath(destPath)
+	if err != nil {
+		return err
+	}
+	if destPath != origDest {
+		fmt.Printf("dest: %s -> %s (resolved against the current directory)\n", origDest, destPath)
+	}
 	if _, err := os.Stat(srcPath); err != nil {
 		return fmt.Errorf("local path: %w", err)
 	}
@@ -494,6 +502,14 @@ func cmdWatch(args []string) error {
 	targetName, destPath, ok := strings.Cut(target, ":")
 	if !ok || targetName == "" || destPath == "" {
 		return fmt.Errorf("target must be <node|machine-id>:<dest-path>, got %q", target)
+	}
+	origDest := destPath
+	destPath, err := resolveDestPath(destPath)
+	if err != nil {
+		return err
+	}
+	if destPath != origDest {
+		fmt.Printf("dest: %s -> %s (resolved against the current directory)\n", origDest, destPath)
 	}
 	info, err := os.Stat(localPath)
 	if err != nil {

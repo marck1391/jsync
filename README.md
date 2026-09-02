@@ -203,6 +203,12 @@ A raw `machine_id` still works anywhere an alias does.
 
 Targets accept a `nodes:` alias or a raw `machine_id`, interchangeably.
 
+A **relative `<dest-path>`** (`peer:./sub`, `peer:out`) is resolved by `jsync` against
+the directory you run it from, then sent as an absolute path — so it still has to land
+inside one of the daemon's `allowed_dest_paths`. Run `jsync` from a directory that also
+exists on the daemon (the common case: same host) for this to be useful. An absolute
+`<dest-path>` — including a POSIX `/srv/x` from a Windows client — is sent unchanged.
+
 **`share` flags:** `--config`, `--encrypt`, `--timeout` (10s), `--transfer-timeout` (2m),
 `--retries` (2, auto-resumes), `--retry-wait` (3s).
 
