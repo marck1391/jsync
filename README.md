@@ -19,7 +19,7 @@ on the others, live. Each node still keeps its own real, local copy on its own d
   <img alt="Go" src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-informational">
   <img alt="Status" src="https://img.shields.io/badge/status-all%20phases%20implemented-success">
-  <img alt="License" src="https://img.shields.io/badge/license-TBD-lightgrey">
+  <img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue">
 </p>
 
 ```
@@ -349,7 +349,10 @@ session cache between transfers, live re-reconciliation after a watcher buffer o
 
 ## License
 
-No `LICENSE` file yet — add one before publishing. MIT or Apache-2.0 are the usual
-choices for a CLI like this.
+[GNU GPL-3.0-or-later](LICENSE). jsync is free software and stays that way: you may run,
+study, share and modify it, and any distributed version — modified or not — must ship its
+source under the same license. There is no closed-source fork.
+
+© 2026 Marco Orta and jsync contributors.
 
 [NATS]: https://nats.io
