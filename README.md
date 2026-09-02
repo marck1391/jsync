@@ -4,6 +4,10 @@
   (`module jsync` -> `module github.com/<owner>/jsync`) if that differs.
 -->
 
+<p align="center">
+  <img src="jsync.png" alt="jsync" width="440">
+</p>
+
 # jsync
 
 **Signal-style `scp`/`rsync`** — file transfer and reactive directory sync between
