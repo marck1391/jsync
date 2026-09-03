@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -118,6 +119,25 @@ type aliasEnvelope struct {
 // project CLAUDE.md for why this convention exists.
 const configDir = ".jsync"
 
+// Defaults returns the same zero-config Config that Load overlays a file
+// onto — exported so `jsync configure` / `jsyncd install` can pre-fill their
+// prompts (host, ports, prekey count, the `.jsync/` paths) without
+// re-hardcoding the literals.
+func Defaults() Config { return defaults() }
+
+// ValidNodeAlias rejects `nodes:` alias names that would break
+// `<alias>:<dest-path>` parsing or collide with path syntax. Shared by
+// `jsync node add` and the `jsync configure` / `jsyncd install` wizard.
+func ValidNodeAlias(alias string) error {
+	if alias == "" {
+		return fmt.Errorf("alias must not be empty")
+	}
+	if strings.ContainsAny(alias, ":/\\ \t") {
+		return fmt.Errorf("alias %q must not contain ':', '/', '\\' or whitespace", alias)
+	}
+	return nil
+}
+
 func defaults() Config {
 	return Config{
 		Role:                  RoleHub,
@@ -157,16 +177,26 @@ func Resolve(explicit string) (path string, found bool) {
 		if local := "jsync.yaml"; fileExists(local) {
 			path = local
 		} else {
-			base := os.Getenv("XDG_CONFIG_HOME")
-			if base == "" {
-				if home, err := os.UserHomeDir(); err == nil {
-					base = filepath.Join(home, ".config")
-				}
-			}
-			path = filepath.Join(base, "jsync", "config.yaml")
+			path = SystemConfigPath()
 		}
 	}
 	return path, fileExists(path)
+}
+
+// SystemConfigPath is the canonical, cwd-independent config location:
+// $XDG_CONFIG_HOME/jsync/config.yaml, falling back to
+// ~/.config/jsync/config.yaml. Resolve returns it as the last resort;
+// `jsyncd install` uses it directly, since a service does not run in the
+// directory `jsync configure` was invoked from and must not pick up a
+// stray ./jsync.yaml.
+func SystemConfigPath() string {
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			base = filepath.Join(home, ".config")
+		}
+	}
+	return filepath.Join(base, "jsync", "config.yaml")
 }
 
 func fileExists(p string) bool {

@@ -121,6 +121,11 @@ go install github.com/marck1391/jsync/cmd/jsyncd@latest
 
 ## Quick start
 
+> **Guided:** run `jsync configure` on each machine instead of the steps below — it walks you
+> through role, network, and the directories to expose, writes `jsync.yaml`, and creates the
+> identity. `jsyncd install` does the same and then registers the daemon as a system service.
+> You still exchange public keys (step 3) by hand.
+
 A hub (say, your laptop) and a peer (a VM). Run each block on the machine named.
 
 ### 1. Hub — write `jsync.yaml` and start the daemon
@@ -197,6 +202,7 @@ A raw `machine_id` still works anywhere an alias does.
 
 | Command | Description |
 |---|---|
+| `jsync configure` | Interactive first-run REPL (charm/huh): writes `jsync.yaml`, creates the identity + prekeys, registers the directories to expose, optionally starts `jsync watch` for one of them. |
 | `jsync keys show` | Print this node's `machine_id` and base64 public key. |
 | `jsync keys authorize <base64-pubkey>` | Trust a peer's key (appends to `authorized_clients`). |
 | `jsync node add <alias> <machine-id>` · `rm <alias>` · `ls` | Manage friendly names for peers in the config's `nodes:` map (edited in place, comments preserved). |
@@ -225,10 +231,17 @@ exists on the daemon (the common case: same host) for this to be useful. An abso
 ### `jsyncd`
 
 ```
-jsyncd [--config <path>]
+jsyncd [--config <path>]     run in the foreground; SIGINT/SIGTERM drains sessions gracefully
+jsyncd install [--config]    interactive setup (same REPL as `jsync configure`), then register
+                             jsyncd with the OS service manager (systemd / launchd / Windows SCM)
+jsyncd uninstall             remove the service
+jsyncd start | stop | restart   control the installed service
+jsyncd status                print the service state (running / stopped / not installed)
 ```
 
-Runs until `SIGINT` / `SIGTERM`, then drains in-flight sessions gracefully.
+`install` / `uninstall` / `start` / `stop` / `restart` need root (Linux/macOS) or an elevated
+shell (Windows). The config path chosen in the wizard is resolved to an absolute path and baked
+into the service definition — a service has no meaningful working directory of its own.
 
 ## Configuration
 
@@ -314,6 +327,8 @@ internal/
   syncfs/       event protocol, echo suppression, conflicts, reconciliation
   ignore/       .jsyncignore (gitignore syntax) + defaults
   config/       jsync.yaml load + resolution
+  yamledit/     in-place yaml.Node config edits (comments/order preserved)
+  wizard/       shared interactive setup REPL (charm/huh)
   progress/     transfer progress bar
   auditlog/     mirrored-operation log
 ```

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"flag"
 	"fmt"
 	"os"
@@ -12,6 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/marck1391/jsync/internal/config"
+	"github.com/marck1391/jsync/internal/yamledit"
 )
 
 // cmdAllow edits the `allowed_dest_paths` list in the jsync config file:
@@ -95,20 +95,16 @@ func cmdAllow(args []string) error {
 // created (along with its directory). A pre-existing singular
 // `allowed_dest_path` key is folded into the sequence and dropped.
 func editAllowedDestPaths(cfgFile, target string, remove bool) (bool, error) {
-	var doc yaml.Node
-	if data, err := os.ReadFile(cfgFile); err == nil {
-		if err := yaml.Unmarshal(data, &doc); err != nil {
-			return false, fmt.Errorf("parse %s: %w", cfgFile, err)
-		}
-	} else if !os.IsNotExist(err) {
-		return false, fmt.Errorf("read %s: %w", cfgFile, err)
+	doc, err := yamledit.Load(cfgFile)
+	if err != nil {
+		return false, err
 	}
 
-	root := documentRoot(&doc)
-	seq := mappingValue(root, "allowed_dest_paths")
+	root := yamledit.DocumentRoot(&doc)
+	seq := yamledit.Get(root, "allowed_dest_paths")
 	if seq == nil {
-		seq = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
-		mappingSet(root, "allowed_dest_paths", seq)
+		seq = yamledit.Sequence()
+		yamledit.Set(root, "allowed_dest_paths", seq)
 	} else if seq.Kind == yaml.ScalarNode {
 		// `allowed_dest_paths: /one` — promote to a one-item sequence.
 		scalar := *seq
@@ -116,15 +112,15 @@ func editAllowedDestPaths(cfgFile, target string, remove bool) (bool, error) {
 	}
 
 	// Fold a legacy singular key in, then delete it.
-	if legacy := mappingDelete(root, "allowed_dest_path"); legacy != nil && legacy.Kind == yaml.ScalarNode && legacy.Value != "" {
-		seqAppendUnique(seq, legacy.Value)
+	if legacy := yamledit.Delete(root, "allowed_dest_path"); legacy != nil && legacy.Kind == yaml.ScalarNode && legacy.Value != "" {
+		yamledit.AppendUnique(seq, legacy.Value)
 	}
 
 	changed := false
 	if remove {
 		kept := seq.Content[:0]
 		for _, item := range seq.Content {
-			if item.Kind == yaml.ScalarNode && samePath(item.Value, target) {
+			if item.Kind == yaml.ScalarNode && yamledit.SamePath(item.Value, target) {
 				changed = true
 				continue
 			}
@@ -132,109 +128,21 @@ func editAllowedDestPaths(cfgFile, target string, remove bool) (bool, error) {
 		}
 		seq.Content = kept
 	} else {
-		changed = seqAppendUnique(seq, target)
+		changed = yamledit.AppendUnique(seq, target)
 	}
 
 	if !changed {
 		return false, nil
 	}
 
-	buf, err := marshalNode(&doc)
+	buf, err := yamledit.Marshal(&doc)
 	if err != nil {
 		return false, err
 	}
-	if err := os.MkdirAll(filepath.Dir(cfgFile), 0o755); err != nil {
-		return false, fmt.Errorf("create %s: %w", filepath.Dir(cfgFile), err)
-	}
-	tmp := cfgFile + ".tmp"
-	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
-		return false, fmt.Errorf("write %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, cfgFile); err != nil {
-		_ = os.Remove(tmp)
-		return false, fmt.Errorf("replace %s: %w", cfgFile, err)
+	if err := yamledit.AtomicWrite(cfgFile, buf, 0o600); err != nil {
+		return false, err
 	}
 	return true, nil
-}
-
-// documentRoot returns doc's top mapping node, initialising an empty
-// document (nil Kind) into a fresh mapping.
-func documentRoot(doc *yaml.Node) *yaml.Node {
-	if doc.Kind == 0 {
-		doc.Kind = yaml.DocumentNode
-	}
-	if len(doc.Content) == 0 {
-		doc.Content = []*yaml.Node{{Kind: yaml.MappingNode, Tag: "!!map"}}
-	}
-	return doc.Content[0]
-}
-
-// mappingValue returns the value node for key in a mapping node, or nil.
-func mappingValue(m *yaml.Node, key string) *yaml.Node {
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			return m.Content[i+1]
-		}
-	}
-	return nil
-}
-
-// mappingSet sets (or replaces) key -> val in a mapping node.
-func mappingSet(m *yaml.Node, key string, val *yaml.Node) {
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			m.Content[i+1] = val
-			return
-		}
-	}
-	m.Content = append(m.Content,
-		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, val)
-}
-
-// mappingDelete removes key from a mapping node, returning its old value
-// node (or nil).
-func mappingDelete(m *yaml.Node, key string) *yaml.Node {
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if m.Content[i].Value == key {
-			val := m.Content[i+1]
-			m.Content = append(m.Content[:i], m.Content[i+2:]...)
-			return val
-		}
-	}
-	return nil
-}
-
-// samePath reports whether a and b denote the same location, ignoring
-// trailing slashes and redundant separators (filepath.Clean), without
-// otherwise rewriting either string.
-func samePath(a, b string) bool {
-	return filepath.Clean(a) == filepath.Clean(b)
-}
-
-// seqAppendUnique appends value as a scalar to seq (verbatim — the caller
-// decides the canonical form) unless a samePath item is already present;
-// returns whether it appended.
-func seqAppendUnique(seq *yaml.Node, value string) bool {
-	for _, item := range seq.Content {
-		if item.Kind == yaml.ScalarNode && samePath(item.Value, value) {
-			return false
-		}
-	}
-	seq.Content = append(seq.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value})
-	return true
-}
-
-func marshalNode(doc *yaml.Node) ([]byte, error) {
-	var b bytes.Buffer
-	enc := yaml.NewEncoder(&b)
-	enc.SetIndent(2)
-	if err := enc.Encode(doc); err != nil {
-		return nil, fmt.Errorf("encode yaml: %w", err)
-	}
-	if err := enc.Close(); err != nil {
-		return nil, fmt.Errorf("encode yaml: %w", err)
-	}
-	return b.Bytes(), nil
 }
 
 // daemonReachable reports whether a NATS client port is accepting

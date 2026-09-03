@@ -2,6 +2,17 @@
 // bootstraps the NATS connection in either hub or peer role (Fase 1),
 // answers handshake requests, consumes JetStream transfers, and runs the
 // Fase 5 filesystem watcher for any configured sync roots.
+//
+// Invocation forms:
+//
+//	jsyncd [--config path]     run in the foreground (Ctrl+C / SIGTERM to stop)
+//	jsyncd install [--config]  interactive setup, then register as a system service
+//	jsyncd uninstall           remove the system service
+//	jsyncd start|stop|restart  control the installed service
+//	jsyncd status              print the installed service's state
+//
+// When the OS service manager launches jsyncd, service.Interactive() is
+// false and control is handed to service.Run (which calls program.Start).
 package main
 
 import (
@@ -11,9 +22,11 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/kardianos/service"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/marck1391/jsync/internal/config"
@@ -36,18 +49,153 @@ const prekeySaveInterval = 10 * time.Second
 // Ordenado".
 const drainTimeout = 10 * time.Second
 
+// serviceName is what `jsyncd install` registers with the OS service
+// manager (systemd unit name / Windows service name / launchd label).
+const serviceName = "jsyncd"
+
 func main() {
-	if err := run(); err != nil {
+	if err := dispatch(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "jsyncd:", err)
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	cfgPath := flag.String("config", "", "path to the jsync config file (default: ./jsync.yaml or ~/.config/jsync/config.yaml)")
-	flag.Parse()
+const usageText = `usage:
+  jsyncd [--config <path>]        run in the foreground (SIGINT/SIGTERM drains gracefully)
+  jsyncd install [--config path]  interactive setup, then register as a system service
+  jsyncd uninstall                remove the system service
+  jsyncd start | stop | restart   control the installed service
+  jsyncd status                   print the installed service's state
+`
 
-	resolved, _ := config.Resolve(*cfgPath)
+// dispatch routes a leading verb (install / uninstall / start / stop /
+// restart / status) to service management, and everything else — a bare
+// `jsyncd` or `jsyncd --config path` — to running the daemon: in the
+// foreground when interactive, or under service.Run when the OS service
+// manager started us.
+func dispatch(args []string) error {
+	verb := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		verb, args = args[0], args[1:]
+	}
+	if verb == "help" || verb == "-h" || verb == "--help" || verb == "-help" {
+		fmt.Print(usageText)
+		return nil
+	}
+
+	switch verb {
+	case "install", "uninstall", "start", "stop", "restart", "status":
+		svc, svcCfg, err := newService("")
+		if err != nil {
+			return err
+		}
+		switch verb {
+		case "install":
+			return cmdInstall(svc, svcCfg, args)
+		case "status":
+			return reportStatus(svc)
+		default:
+			return controlAndReport(svc, verb)
+		}
+	case "":
+		// fall through to running the daemon
+	default:
+		return fmt.Errorf("unknown command %q\n%s", verb, usageText)
+	}
+
+	// The run path: parse --config properly — a bad flag or -h/--help stops
+	// here, the way the old top-level flag.Parse (ExitOnError) did.
+	fs := flag.NewFlagSet("jsyncd", flag.ContinueOnError)
+	fs.Usage = func() { fmt.Fprint(os.Stderr, usageText) }
+	cfgPath := fs.String("config", "", "path to the jsync config file")
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return nil
+		}
+		return err
+	}
+
+	svc, _, err := newService(*cfgPath)
+	if err != nil {
+		return err
+	}
+
+	// Started by the OS service manager: hand the process to service.Run,
+	// which calls program.Start and blocks until program.Stop returns.
+	if !service.Interactive() {
+		return svc.Run()
+	}
+
+	// Plain foreground run — unchanged Fase 4 behaviour.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return run(ctx, *cfgPath)
+}
+
+// newService builds the kardianos service handle plus its config. cfgPath
+// goes into program (used when the service manager calls program.Start) and,
+// when non-empty, into the service's own launch arguments.
+func newService(cfgPath string) (service.Service, *service.Config, error) {
+	svcCfg := serviceConfig(cfgPath)
+	svc, err := service.New(&program{cfgPath: cfgPath}, svcCfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("service init: %w", err)
+	}
+	return svc, svcCfg, nil
+}
+
+// serviceConfig is the OS-service registration. Arguments/Executable are
+// filled in by cmdInstall once the wizard has settled on a config path;
+// for the control verbs the already-installed registration is what counts.
+func serviceConfig(cfgPath string) *service.Config {
+	c := &service.Config{
+		Name:        serviceName,
+		DisplayName: "jsync daemon",
+		Description: "jsync always-on sync/transfer node (jsyncd)",
+	}
+	if cfgPath != "" {
+		c.Arguments = []string{"--config", cfgPath}
+	}
+	return c
+}
+
+// program adapts run() to service.Interface: Start must not block, so the
+// daemon runs on its own goroutine under a context that Stop cancels.
+type program struct {
+	cfgPath string
+	cancel  context.CancelFunc
+	done    chan struct{}
+	err     error
+}
+
+func (p *program) Start(service.Service) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	p.cancel = cancel
+	p.done = make(chan struct{})
+	go func() {
+		defer close(p.done)
+		p.err = run(ctx, p.cfgPath)
+	}()
+	return nil
+}
+
+func (p *program) Stop(service.Service) error {
+	if p.cancel != nil {
+		p.cancel()
+	}
+	if p.done != nil {
+		select {
+		case <-p.done:
+		case <-time.After(drainTimeout + 2*time.Second):
+		}
+	}
+	return p.err
+}
+
+// run is the daemon proper. ctx cancellation (a signal in the foreground, a
+// service Stop under a manager) triggers the ordered shutdown.
+func run(ctx context.Context, cfgPath string) error {
+	resolved, _ := config.Resolve(cfgPath)
 	cfg, err := config.Load(resolved)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -98,9 +246,6 @@ func run() error {
 		node.Close()
 		return fmt.Errorf("init jetstream: %w", err)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	resumes := daemon.NewResumeRegistry()
 

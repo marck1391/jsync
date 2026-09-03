@@ -3,14 +3,12 @@ package main
 import (
 	"flag"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/marck1391/jsync/internal/config"
+	"github.com/marck1391/jsync/internal/yamledit"
 )
 
 // cmdNode manages the `nodes:` alias map in the jsync config file — friendly
@@ -96,32 +94,21 @@ func cmdNode(args []string) error {
 }
 
 // validAlias rejects names that would break `<alias>:<dest-path>` parsing or
-// collide with path syntax.
-func validAlias(alias string) error {
-	if alias == "" {
-		return fmt.Errorf("alias must not be empty")
-	}
-	if strings.ContainsAny(alias, ":/\\ \t") {
-		return fmt.Errorf("alias %q must not contain ':', '/', '\\' or whitespace", alias)
-	}
-	return nil
-}
+// collide with path syntax. The rule lives in internal/config so
+// `jsync configure` / `jsyncd install` apply the same one.
+func validAlias(alias string) error { return config.ValidNodeAlias(alias) }
 
 // editNodes sets or removes one entry in the `nodes:` mapping of cfgFile and
 // writes it back atomically. A missing file/key is created; removing the
 // last entry drops the `nodes:` key entirely.
 func editNodes(cfgFile, alias, machineID string, remove bool) (bool, error) {
-	var doc yaml.Node
-	if data, err := os.ReadFile(cfgFile); err == nil {
-		if err := yaml.Unmarshal(data, &doc); err != nil {
-			return false, fmt.Errorf("parse %s: %w", cfgFile, err)
-		}
-	} else if !os.IsNotExist(err) {
-		return false, fmt.Errorf("read %s: %w", cfgFile, err)
+	doc, err := yamledit.Load(cfgFile)
+	if err != nil {
+		return false, err
 	}
 
-	root := documentRoot(&doc)
-	nodes := mappingValue(root, "nodes")
+	root := yamledit.DocumentRoot(&doc)
+	nodes := yamledit.Get(root, "nodes")
 	if nodes != nil && nodes.Kind != yaml.MappingNode {
 		return false, fmt.Errorf("%s: `nodes` is not a mapping", cfgFile)
 	}
@@ -130,37 +117,29 @@ func editNodes(cfgFile, alias, machineID string, remove bool) (bool, error) {
 		if nodes == nil {
 			return false, nil
 		}
-		if old := mappingDelete(nodes, alias); old == nil {
+		if old := yamledit.Delete(nodes, alias); old == nil {
 			return false, nil
 		}
 		if len(nodes.Content) == 0 {
-			mappingDelete(root, "nodes")
+			yamledit.Delete(root, "nodes")
 		}
 	} else {
 		if nodes == nil {
-			nodes = &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
-			mappingSet(root, "nodes", nodes)
+			nodes = yamledit.Mapping()
+			yamledit.Set(root, "nodes", nodes)
 		}
-		if cur := mappingValue(nodes, alias); cur != nil && cur.Kind == yaml.ScalarNode && cur.Value == machineID {
+		if cur := yamledit.Get(nodes, alias); cur != nil && cur.Kind == yaml.ScalarNode && cur.Value == machineID {
 			return false, nil
 		}
-		mappingSet(nodes, alias, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: machineID})
+		yamledit.SetString(nodes, alias, machineID)
 	}
 
-	buf, err := marshalNode(&doc)
+	buf, err := yamledit.Marshal(&doc)
 	if err != nil {
 		return false, err
 	}
-	if err := os.MkdirAll(filepath.Dir(cfgFile), 0o755); err != nil {
-		return false, fmt.Errorf("create %s: %w", filepath.Dir(cfgFile), err)
-	}
-	tmp := cfgFile + ".tmp"
-	if err := os.WriteFile(tmp, buf, 0o600); err != nil {
-		return false, fmt.Errorf("write %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, cfgFile); err != nil {
-		_ = os.Remove(tmp)
-		return false, fmt.Errorf("replace %s: %w", cfgFile, err)
+	if err := yamledit.AtomicWrite(cfgFile, buf, 0o600); err != nil {
+		return false, err
 	}
 	return true, nil
 }

@@ -44,6 +44,7 @@ type subcommand struct {
 }
 
 var subcommands = []subcommand{
+	{"configure", "jsync configure [--config path]", cmdConfigure},
 	{"share", "jsync share [--config path] <local-path> <node|machine-id>:<dest-path>", cmdShare},
 	{"pull", "jsync pull <target-machine-id>:<path> <dest>", blockedOnPhase("Fase 2 (motor de streaming)")},
 	{"watch", "jsync watch [--config path] <local-path> <node|machine-id>:<dest-path>", cmdWatch},
